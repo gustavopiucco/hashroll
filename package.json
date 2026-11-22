@@ -1,0 +1,23 @@
+{
+  "name": "hashroll",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "contracts"
+  ],
+  "scripts": {
+    "build": "npm run build -w @hashroll/fair && npm run build -w @hashroll/api && npm run build -w @hashroll/web",
+    "test": "npm test -w @hashroll/fair && npm test -w @hashroll/api && npm run test:contracts",
+    "build:fair": "npm run build -w @hashroll/fair",
+    "test:fair": "npm test -w @hashroll/fair",
+    "test:contracts": "docker run --rm -v \"$PWD\":/work -w /work/contracts --entrypoint forge ghcr.io/foundry-rs/foundry:stable test -vv",
+    "dev:infra": "docker compose up -d",
+    "dev:api": "npm run build:fair && npm run start:dev -w @hashroll/api",
+    "dev:web": "npm run build:fair && npm run dev -w @hashroll/web",
+    "deploy:local": "docker run --rm --network hashroll_default -v \"$PWD\":/work -w /work/contracts -e SIGNER_ADDRESS=0x70997970C51812dc3A010C7d01b50e0d17dc79C8 --entrypoint forge ghcr.io/foundry-rs/foundry:stable script script/Deploy.s.sol --rpc-url http://anvil:8545 --broadcast --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+  },
+  "engines": {
+    "node": ">=22.12"
+  }
+}
