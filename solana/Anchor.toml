@@ -1,0 +1,13 @@
+[toolchain]
+anchor_version = "0.32.1"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+hashroll = "D6s76Umz4mQUoy9ySiU3vtb9cjWnHuGUBuBwmgbvwxxQ"
+
+[provider]
+cluster = "localnet"
+wallet = "keys/dev/admin.json"

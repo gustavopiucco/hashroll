@@ -9,7 +9,7 @@ const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"]
 
 export const metadata: Metadata = {
   title: "Hashroll",
-  description: "Provably fair dice on the blockchain",
+  description: "Provably fair on-chain dice on Solana",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

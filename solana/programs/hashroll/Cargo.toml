@@ -1,0 +1,31 @@
+[package]
+name = "hashroll"
+version = "0.1.0"
+description = "Hashroll: provably fair on-chain dice"
+edition = "2021"
+# The Solana platform-tools toolchain ships Cargo 1.84. Keeping the MSRV here lets
+# `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback` pick compatible dependency versions.
+rust-version = "1.84"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "hashroll"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = "0.32.1"
+anchor-spl = "0.32.1"
+solana-sha256-hasher = "2.3"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

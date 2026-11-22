@@ -6,7 +6,7 @@ The whole project is in **English**: code, identifiers, comments, docstrings, te
 
 The user may chat in Portuguese; reply in the user's language, but keep everything that goes into the repository in English.
 
-Do not modify vendored third-party code (`contracts/lib/`).
+Do not edit generated code by hand: `solana/client/src/idl/` is produced by `npm run build:program`.
 
 ## Commit workflow
 

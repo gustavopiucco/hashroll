@@ -1,15 +1,19 @@
 "use client";
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useState, type ReactNode } from "react";
-import { WagmiProvider } from "wagmi";
-import { wagmiConfig } from "@/lib/wagmi";
+import type { ReactNode } from "react";
+import { ConnectionProvider, WalletProvider } from "@solana/wallet-adapter-react";
+import { RPC_URL } from "@/lib/solana";
 
+/**
+ * No wallet adapters are listed on purpose: Phantom, Solflare, Backpack and other wallets
+ * implement the Wallet Standard and are detected automatically.
+ */
 export function Providers({ children }: { children: ReactNode }) {
-  const [qc] = useState(() => new QueryClient());
   return (
-    <WagmiProvider config={wagmiConfig}>
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-    </WagmiProvider>
+    <ConnectionProvider endpoint={RPC_URL} config={{ commitment: "confirmed" }}>
+      <WalletProvider wallets={[]} autoConnect>
+        {children}
+      </WalletProvider>
+    </ConnectionProvider>
   );
 }

@@ -10,10 +10,25 @@ services:
     ports: ["5432:5432"]
     volumes: [pgdata:/var/lib/postgresql/data]
 
-  anvil:
-    image: ghcr.io/foundry-rs/foundry:stable
-    entrypoint: ["anvil", "--host", "0.0.0.0", "--chain-id", "31337"]
-    ports: ["8545:8545"]
+  # Local Solana cluster. The image is amd64-only; on Apple Silicon it runs under emulation.
+  # The ledger lives inside the container: recreating it resets the chain.
+  # `--mint` funds the dev admin keypair (solana/keys/dev/admin.json) with SOL for deploys.
+  solana:
+    image: solanafoundation/anchor:v0.32.1
+    platform: linux/amd64
+    entrypoint:
+      - solana-test-validator
+      - --ledger
+      - /tmp/ledger
+      - --reset
+      - --quiet
+      - --bind-address
+      - 0.0.0.0
+      - --rpc-port
+      - "8899"
+      - --mint
+      - DeEPqjZz1pkicuqyTJpToTWB9uC3a5uTtc1YtXZ3N4Jr
+    ports: ["8899:8899", "8900:8900"]
 
 volumes:
   pgdata:

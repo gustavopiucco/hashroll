@@ -3,7 +3,7 @@ dist/
 .next/
 .env
 .env.local
-contracts/out/
-contracts/cache/
-contracts/broadcast/
+solana/target/
+solana/.anchor/
 *.tsbuildinfo
+test-ledger/

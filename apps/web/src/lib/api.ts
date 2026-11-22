@@ -1,29 +1,5 @@
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
-export interface PlayerState {
-  address: string;
-  balance: string;
-  commitment: string;
-  clientSeed: string;
-  nonce: number;
-  houseEdgeBps: number;
-  maxProfit: string;
-}
-
-export interface BetRecord {
-  id: number;
-  nonce: number;
-  commitment: string;
-  clientSeed: string;
-  amount: string;
-  target: number;
-  direction: "under" | "over";
-  roll: number;
-  win: boolean;
-  payout: string;
-  createdAt: string;
-}
-
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API}${path}`, {
     ...init,
@@ -34,15 +10,24 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+export interface HouseInfo {
+  programId: string;
+  house: string;
+  mint: string;
+  houseEdgeBps: number;
+  maxPayoutBps: number;
+  settleTimeoutSecs: number;
+  paused: boolean;
+  bankroll: string;
+  reserved: string;
+  maxProfit: string;
+}
+
+/** The API only does what needs the house key. Everything else is read from the chain. */
 export const api = {
-  state: (a: string) => call<PlayerState>(`/players/${a}`),
-  bets: (a: string) => call<BetRecord[]>(`/players/${a}/bets`),
-  faucet: (a: string) => call<PlayerState>(`/players/${a}/dev/faucet`, { method: "POST" }),
-  dice: (a: string, b: { amount: string; target: number; direction: "under" | "over" }) =>
-    call<{ bet: BetRecord; balance: string }>(`/players/${a}/dice`, { method: "POST", body: JSON.stringify(b) }),
-  rotate: (a: string, clientSeed?: string) =>
-    call<{ revealed: { serverSeed: string; commitment: string; clientSeed: string; lastNonce: number }; next: PlayerState }>(
-      `/players/${a}/seeds/rotate`,
-      { method: "POST", body: JSON.stringify({ clientSeed }) },
-    ),
+  house: () => call<HouseInfo>("/house"),
+  /** Opens the player's on-chain account (the house pays the rent) and makes sure a seed is committed. */
+  open: (address: string) => call<unknown>(`/players/${address}/open`, { method: "POST" }),
+  /** Local dev only: 2 SOL for fees + 1000 HROLL. */
+  faucet: (address: string) => call<unknown>(`/players/${address}/dev/faucet`, { method: "POST" }),
 };

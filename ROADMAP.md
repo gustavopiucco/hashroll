@@ -1,19 +1,23 @@
 # Hashroll Roadmap
 
-Each phase has an **exit criterion**. Do not move to a public network before passing the "gates" marked with 🔒.
+Each phase has an **exit criterion**. Do not move to a public cluster before passing the "gates" marked with 🔒.
 
 ---
 
 ## ✅ Phase 0: Foundation (done)
 
-- [x] Monorepo with npm workspaces (`packages/fair`, `apps/api`, `apps/web`, `contracts`)
+- [x] Monorepo with npm workspaces (`packages/fair`, `solana`, `apps/api`, `apps/web`)
 - [x] Isomorphic Provably Fair package with documented specification, fixed vectors and cross-check against `node:crypto`
-- [x] `HashrollToken` (ERC-20 + Permit, fixed supply)
-- [x] `HouseBankroll`: deposit, EIP-712 voucher withdrawal (nonce, deadline, domain), `maxPayout` proportional to the bankroll, pause, Ownable2Step
-- [x] Foundry tests, including deposit/withdraw fuzzing
-- [x] NestJS API: per-player seeds, Dice bet, rotation/reveal, history, dev faucet
-- [x] Next.js web: wallet connection, Dice screen and 100% client-side `/verify` verifier (builds and serves the pages; **the click-through flow with a real wallet has not been tested in the browser yet**, which is the first item of phase 1)
-- [x] docker-compose (Postgres, Anvil) and local deploy script
+- [x] **Migration from EVM to Solana, fully on-chain:** bets, bankroll and payouts live in the `hashroll` Anchor program
+  - [x] HROLL as an SPL token (9 decimals, fixed supply, mint authority revoked)
+  - [x] Vault owned by a program PDA, payout reservation, profit cap proportional to the free bankroll, pause, two-step admin, upgrade-authority-gated `initialize`
+  - [x] Per-bet commit-reveal with on-chain HMAC-SHA256 (same spec and vectors as `packages/fair`) and full-payout timeout claim
+- [x] Rust unit tests (fixed vectors) and LiteSVM integration tests (rounds, wrong seed, wrong settler, commitment lock, profit cap, timeout, reserved funds)
+- [x] NestJS API as "the house": stateless seed derivation, account opening, settler loop, dev faucet
+- [x] Next.js web: Solana wallet connection, Dice screen, on-chain history, `/verify` pre-filled from the history
+- [x] docker-compose (Postgres, `solana-test-validator`), Dockerized Anchor build, local deploy/bootstrap and an end-to-end smoke script (`e2e:local`)
+
+The click-through flow with a real browser wallet has not been tested yet; it is the first item of phase 1.
 
 ---
 
@@ -21,61 +25,54 @@ Each phase has an **exit criterion**. Do not move to a public network before pas
 
 **Goal:** the local flow becomes reliable and pleasant to use.
 
-- [ ] Manual browser test with MetaMask/Rabby (connect → faucet → bet → reveal → verify) + E2E tests with Playwright
-- [ ] DTO validation (`class-validator` or `zod`) and standardized error responses
+- [ ] Manual browser test with Phantom/Solflare/Backpack (connect → faucet → bet → settle → verify → timeout claim) + E2E tests with Playwright
+- [ ] DTO validation (`zod`) and standardized error responses; map Anchor error codes to friendly UI messages
 - [ ] Dice animation with Pixi.js (graphics engine mentioned in the architecture)
-- [ ] When revealing the seed, open `/verify` directly with the fields pre-filled (query string)
-- [ ] Let the player edit the client seed in the UI before rotating
-- [ ] Simple auto-bet (N bets, stop on profit or loss)
-- [ ] Lint, format and CI (GitHub Actions running `npm test`)
+- [ ] Simple auto-bet (N bets, stop on profit or loss); consider session keys to avoid one wallet prompt per bet
+- [ ] Program tests for admin paths (`set_params`, `set_house`, pause, two-step admin) and fuzzing of amounts/targets
+- [ ] Lint, format and CI (GitHub Actions running `npm test` and `npm run build:program`)
 
 **Exit:** stable local demo with green CI.
 
 ---
 
-## Phase 2: Persistence and identity
+## Phase 2: House hardening and indexing
 
-**Goal:** move off memory and know who the player is.
+**Goal:** the house is robust and the history does not depend on RPC log scanning.
 
-- [ ] **PostgreSQL** with an ORM (Drizzle or Prisma). Tables `players`, `seed_pairs`, `bets` and `ledger` (double-entry ledger: every credit and debit becomes an immutable row)
-- [ ] Bet in a **single transaction** with `SELECT … FOR UPDATE` on the player, so that debit, nonce increment and bet record are atomic
-- [ ] Server seeds encrypted at rest, with the key outside the database
-- [ ] **Sign-In With Ethereum (EIP-4361)** with sessions in **Postgres** (`sessions` table with `expires_at`) or a signed cookie, removing the free `:address` from the routes
-- [ ] Rate limiting per player and per IP (`@nestjs/throttler` in memory while there is a single instance; Postgres counter or reverse proxy when scaling)
-- [ ] WebSocket for real-time balance and history
+- [ ] Rate limiting on `open_player` (it costs the house rent) and on the faucet
+- [ ] Settler: priority fees, retries with backoff, alerting when a bet gets close to its timeout, and a health endpoint
+- [ ] Run more than one settler safely (idempotent by `(player, nonce)`; the program already rejects double settlement)
+- [ ] **Indexer** (Helius webhooks/Geyser or a custom log subscriber) writing `BetSettled`/`BetExpired` events to **PostgreSQL**, for history, stats and reconciliation
+- [ ] WebSocket for real-time results instead of polling the player account
 
-**Exit:** restarting the API loses nothing and only the wallet owner can bet.
-
----
-
-## Phase 3: Connect on-chain to off-chain
-
-**Goal:** close the deposit → bet → withdraw loop with real tokens (still on testnet).
-
-- [ ] **Indexer** with Ponder (recommended) or The Graph, listening to `Deposited` and `Withdrawn`
-  - Credit the balance only after N confirmations, idempotently by `(txHash, logIndex)`
-- [ ] **Withdrawal endpoint:** debits the ledger and signs the EIP-712 voucher with viem (`signTypedData`), using the same nonce as the contract
-  - Signer in KMS/HSM, never in an environment variable in production
-- [ ] Deposit UI (approve or permit, then `deposit`) and withdrawal UI (request voucher, then `withdraw`)
-- [ ] Read on-chain `maxPayout()` (cached) to cap the maximum profit per bet, removing `MAX_PROFIT_WEI`
-- [ ] Remove the dev faucet from any non-local build
-- [ ] Daily reconciliation: sum of off-chain balances + house reserve ≤ on-chain `bankroll()`, with an alert on mismatch
-- [ ] End-to-end integration tests (Anvil + API + contract)
-
-**Exit:** a testnet player deposits, bets and withdraws without human intervention, and reconciliation balances.
+**Exit:** restarting or scaling the API loses nothing and no bet expires during normal operation.
 
 ---
 
-## Phase 4: Public testnet
+## Phase 3: Key management and economics
 
-- [ ] Deploy to **Base Sepolia** (or Polygon Amoy / Arbitrum Sepolia), with deploy scripts parameterized by network
-- [ ] Contract verification on the explorer
-- [ ] `HouseBankroll` owner becomes a **multisig (Safe)**, with a **timelock** on `defundHouse`, `setSigner` and `setMaxPayoutBps`
-- [ ] Observability: structured logs, metrics (volume, actual vs. theoretical RTP, house PnL) and alerts
-- [ ] Public proof of reserves (page with `bankroll()` vs. off-chain liabilities)
+**Goal:** remove the single hot key and make the bankroll sustainable.
+
+- [ ] House key and `HOUSE_SEED_SECRET` in a **KMS/HSM**; seed secret rotation (commit with the new secret only after pending bets settle)
+- [ ] Separate dev faucet from any non-local build (compile it out)
+- [ ] Bankroll LP design: let third parties provide liquidity to the vault (shares, withdrawal queue)
+- [ ] Reconciliation job: vault balance ≥ `reserved`, observed RTP vs. theoretical, house PnL
+
+**Exit:** no secret on disk, and reconciliation runs automatically.
+
+---
+
+## Phase 4: Public devnet
+
+- [ ] Deploy to **Solana devnet** with deploy scripts parameterized by cluster (separate program ID and keys per cluster)
+- [ ] Verifiable build (`solana-verify`) and published IDL
+- [ ] Program upgrade authority and config admin become a **multisig (Squads)**, with a **timelock** on upgrades, `defund_house`, `set_house` and `set_params`
+- [ ] Observability: structured logs, metrics (volume, actual vs. theoretical RTP, house PnL, settle latency) and alerts
+- [ ] Public proof of reserves page (vault vs. reserved, straight from the chain)
 - [ ] Closed beta with testers
 
-**Exit:** weeks of testnet operation without incidents, with observed RTP converging to the theoretical value (99% with a 1% edge).
+**Exit:** weeks of devnet operation without incidents, with observed RTP converging to the theoretical value (99% with a 1% edge).
 
 ---
 
@@ -85,16 +82,16 @@ These items come from section 5 of the original architecture and **are not optio
 
 ### Security
 
-- [ ] Static analysis with **Slither** and **Mythril**, with every finding fixed or justified
-- [ ] Foundry invariant tests (e.g. `withdrawalNonce` only increases, no withdrawal without a valid signature)
-- [ ] **External audit** of the contracts by a specialized firm
-- [ ] API pentest (auth, race conditions on betting, voucher replay)
+- [ ] Static analysis and linting of the program (`cargo clippy`, Anchor `skip-lint = false`, tools such as Sec3 X-ray or Soteria), with every finding fixed or justified
+- [ ] Invariant tests (e.g. `reserved` always covered by the vault, nonce only increases, no payout without a matching reveal)
+- [ ] **External audit** of the program by a firm specialized in Solana
+- [ ] API pentest (house key handling, settler races, rent-draining via `open_player`)
 - [ ] Bug bounty program (e.g. Immunefi)
 
 ### Bankroll
 
 - [ ] Risk model: enough initial capital for the **max payout** with headroom, using the Kelly criterion or Monte Carlo simulation
-- [ ] Review `maxPayoutBps` (currently 1%) based on the simulation
+- [ ] Review `max_payout_bps` (currently 1%) based on the simulation
 - [ ] Circuit breaker: automatic pause if house PnL drops X% within Y minutes
 
 ### Legal and compliance
@@ -111,10 +108,10 @@ These items come from section 5 of the original architecture and **are not optio
 
 ## Phase 6: Mainnet and expansion
 
-- [ ] Deploy to **Base** (or the chosen L2) with initial liquidity
-- [ ] New games reusing `packages/fair`:
+- [ ] Deploy to **Solana mainnet-beta** with initial liquidity
+- [ ] New games reusing `packages/fair` and the commit-reveal settlement:
   - **Crash:** shared rounds over WebSocket, with a pre-committed hash chain
   - **Plinko and Roulette**
-- [ ] Slow-paced games (lottery, raffles) 100% on-chain with **Chainlink VRF**
+- [ ] Evaluate an on-chain VRF (e.g. Switchboard or ORAO) for games where a house reveal is not wanted
 - [ ] Advanced tokenomics: house staking (players as bankroll LPs), affiliate program
-- [ ] Mobile app / PWA
+- [ ] Mobile app / PWA (Solana Mobile Wallet Adapter)

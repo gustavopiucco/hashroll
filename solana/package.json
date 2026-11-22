@@ -1,0 +1,36 @@
+{
+  "name": "@hashroll/program",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "client/dist/index.js",
+  "types": "client/dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./client/dist/index.d.ts",
+      "default": "./client/dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p client/tsconfig.json",
+    "test": "npm run build && vitest run",
+    "bootstrap:local": "tsx scripts/bootstrap-local.ts",
+    "e2e:local": "tsx scripts/e2e-local.ts"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "bn.js": "^5.2.1",
+    "buffer": "^6.0.3"
+  },
+  "devDependencies": {
+    "@hashroll/fair": "*",
+    "@types/bn.js": "^5.1.6",
+    "@types/node": "^24.0.0",
+    "litesvm": "^0.8.0",
+    "tsx": "^4.23.15",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.2"
+  }
+}

@@ -50,7 +50,7 @@ export function computeRoll(serverSeed: string, clientSeed: string, nonce: numbe
 export type Direction = "under" | "over";
 
 export interface DiceBet {
-  amount: bigint;      // in token wei (no floats!)
+  amount: bigint;      // in token base units (HROLL has 9 decimals; no floats!)
   target: number;      // number of winning outcomes, 1..9800 (chance = target/10000)
   direction: Direction;
 }
