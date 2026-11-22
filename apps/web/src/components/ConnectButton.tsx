@@ -2,9 +2,23 @@
 
 import { WalletReadyState } from "@solana/wallet-adapter-base";
 import { useWallet } from "@solana/wallet-adapter-react";
+import { useSyncExternalStore } from "react";
+
+const noopSubscribe = () => () => {};
+
+/** False during SSR and hydration, true afterwards. Wallet detection only exists in the browser. */
+function useIsClient() {
+  return useSyncExternalStore(noopSubscribe, () => true, () => false);
+}
 
 export function ConnectButton() {
   const { publicKey, wallets, select, disconnect, connecting, wallet } = useWallet();
+  const isClient = useIsClient();
+
+  // The server never sees installed wallets, so render a neutral placeholder until hydrated.
+  if (!isClient) {
+    return <div className="h-9" aria-hidden />;
+  }
 
   if (publicKey) {
     const a = publicKey.toBase58();
