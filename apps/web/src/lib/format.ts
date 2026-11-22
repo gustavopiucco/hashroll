@@ -42,3 +42,10 @@ export function verifyHref(b: BetHistoryEntry): string {
   }
   return `/verify?${q}`;
 }
+
+/** Banner text for a settled bet: net profit on a win, what came back otherwise. */
+export function resultDetail(stake: bigint, payout: bigint, formatHroll: (u: bigint) => string): string {
+  if (payout > stake) return `+${formatHroll(payout - stake)} HROLL profit`;
+  if (payout === 0n) return "No win";
+  return `${formatHroll(payout)} HROLL back`;
+}

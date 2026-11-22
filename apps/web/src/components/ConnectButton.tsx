@@ -23,7 +23,7 @@ export function ConnectButton() {
   if (publicKey) {
     const a = publicKey.toBase58();
     return (
-      <button onClick={() => void disconnect()} className="font-mono text-xs rounded border border-white/20 px-3 py-1.5 hover:bg-white/5">
+      <button onClick={() => void disconnect()} className="font-mono text-xs rounded-xl border border-line bg-panel px-3 py-3 hover:bg-white/5">
         {a.slice(0, 4)}…{a.slice(-4)} · disconnect
       </button>
     );
@@ -40,7 +40,7 @@ export function ConnectButton() {
           key={w.adapter.name}
           onClick={() => select(w.adapter.name)}
           disabled={connecting}
-          className="flex items-center gap-2 rounded bg-emerald-500 text-black font-semibold px-4 py-2 hover:bg-emerald-400 disabled:opacity-50"
+          className="flex items-center gap-2 rounded-xl bg-brand text-black font-bold px-5 py-3 shadow-[0_8px_30px_-8px_rgb(44_240_164/0.7)] hover:brightness-110 disabled:opacity-50"
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={w.adapter.icon} alt="" className="h-5 w-5" />
