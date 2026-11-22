@@ -3,7 +3,7 @@ import { AnchorProvider, type Program, type Wallet } from '@coral-xyz/anchor';
 import {
   Connection,
   LAMPORTS_PER_SOL,
-  type PublicKey,
+  PublicKey,
   Transaction,
   type Keypair,
   VersionedTransaction,
@@ -26,6 +26,7 @@ import {
 } from '@hashroll/program';
 import { config, loadKeypair } from '../config.js';
 import { SeedDeriver } from './seeds.js';
+import { isUsableTokenAccount } from './token-account.js';
 
 function keypairWallet(kp: Keypair): Wallet {
   const sign = <T extends Transaction | VersionedTransaction>(tx: T): T => {
@@ -136,20 +137,31 @@ export class HouseService {
       throw new Error(`commitment mismatch for ${key} nonce ${nonce}; the player can claim after the timeout`);
     }
     const mint = await this.getMint();
-    // The token account is only needed to pay a win; if the player closed it, a loss still settles.
+    // The token account is optional: without it the program credits the payout to the player's
+    // `owed` balance (withdrawable later), so nothing the player does to it can block a settlement.
     const ata = playerTokenAccount(mint, player);
-    const ataExists = (await this.connection.getAccountInfo(ata)) !== null;
-    return this.program.methods
-      .settleBet(serverSeed, seeds.commitment(key, nonce + 1))
-      .accountsPartial({
-        house: this.house.publicKey,
-        config: configPda(),
-        playerState: playerPda(player),
-        mint,
-        vault: vaultPda(),
-        playerToken: ataExists ? ata : null,
-      })
-      .rpc();
+    const usable = isUsableTokenAccount(await this.connection.getAccountInfo(ata), mint, player);
+    const send = (playerToken: PublicKey | null) =>
+      this.program.methods
+        .settleBet(serverSeed, seeds.commitment(key, nonce + 1))
+        .accountsPartial({
+          house: this.house.publicKey,
+          config: configPda(),
+          playerState: playerPda(player),
+          mint,
+          vault: vaultPda(),
+          playerToken,
+        })
+        .rpc();
+    if (!usable) return send(null);
+    try {
+      return await send(ata);
+    } catch (e) {
+      // The account may have changed between the check and the transaction. Retry without it, so
+      // the bet still settles (a wrong seed would fail again, which is what we want to see).
+      this.log.warn(`settle with token account failed for ${key} nonce ${nonce}, retrying without it: ${String(e)}`);
+      return send(null);
+    }
   }
 
   /** Development only: 2 SOL for fees + 1000 HROLL from the dev treasury. */

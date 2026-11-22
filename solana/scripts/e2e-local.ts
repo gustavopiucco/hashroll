@@ -1,27 +1,34 @@
 /**
  * End-to-end smoke test against the local stack (validator + deployed program + running API).
- * Acts as a fresh player: faucet → open account → place bets → wait for the house to settle →
- * re-verify every roll with packages/fair.
+ * Acts as a fresh player: faucet → open account → one bet per game (Dice, Plinko, Roulette) → wait
+ * for the house to settle → re-verify every outcome with packages/fair.
  *
- *   npm run e2e:local -w @hashroll/program              # normal rounds (API settler running)
+ *   npm run e2e:local -w @hashroll/program              # one round per game (API settler running)
  *   npm run e2e:local -w @hashroll/program -- --expire  # timeout path (start the API with SETTLER_ENABLED=false)
  */
 import { createHash } from "node:crypto";
 import { Connection, Keypair, Transaction, type TransactionInstruction } from "@solana/web3.js";
-import { computeRoll, payoutFor, verifyCommitment } from "@hashroll/fair";
 import {
-  BN,
+  computeRoll,
+  encodePlinkoPath,
+  payoutFor,
+  resolvePlinko,
+  resolveRoulette,
+  rouletteMasks,
+  verifyCommitment,
+} from "@hashroll/fair";
+import {
   HROLL_UNIT,
   configPda,
   fetchBetHistory,
   fetchPlayer,
   formatHroll,
-  fromHex,
-  playerPda,
+  placeBetInstruction,
+  playerAccounts,
   playerTokenAccount,
   readOnlyProgram,
-  toAnchorDirection,
-  vaultPda,
+  type BetInput,
+  type BetHistoryEntry,
 } from "../client/src/index.js";
 
 const RPC_URL = process.env.SOLANA_RPC_URL ?? "http://localhost:8899";
@@ -74,20 +81,43 @@ async function main() {
   const cfg = await program.account.config.fetch(configPda());
   check((await tokenBalance(mint)) === 1_000n * HROLL_UNIT, "faucet credited 1000 HROLL");
 
-  const accounts = { player: p, config: configPda(), playerState: playerPda(p), mint, vault: vaultPda(), playerToken: playerTokenAccount(mint, p) };
-  const rounds = expire ? 1 : 3;
-  for (let i = 0; i < rounds; i++) {
+  const accounts = playerAccounts(p, mint);
+  const u = HROLL_UNIT;
+  const rounds: { bet: BetInput; stake: bigint; reference: (seed: string, client: string, nonce: number) => { outcome: number; payout: bigint } }[] = [
+    {
+      bet: { game: "dice", amount: 5n * u, target: 4950, direction: "under" },
+      stake: 5n * u,
+      reference: (s, c, n) => {
+        const roll = computeRoll(s, c, n);
+        return { outcome: roll, payout: roll < 4950 ? payoutFor(5n * u, 4950, cfg.houseEdgeBps) : 0n };
+      },
+    },
+    {
+      bet: { game: "plinko", amount: 5n * u, rows: 12, risk: "medium" },
+      stake: 5n * u,
+      reference: (s, c, n) => {
+        const r = resolvePlinko({ amount: 5n * u, rows: 12, risk: "medium" }, { serverSeed: s, clientSeed: c, nonce: n });
+        return { outcome: encodePlinkoPath(r.path), payout: r.payout };
+      },
+    },
+    {
+      bet: { game: "roulette", chips: [{ mask: rouletteMasks.red(), amount: 3n * u }, { mask: rouletteMasks.straight(17), amount: 1n * u }] },
+      stake: 4n * u,
+      reference: (s, c, n) => {
+        const chips = [{ mask: rouletteMasks.red(), amount: 3n * u }, { mask: rouletteMasks.straight(17), amount: 1n * u }];
+        const r = resolveRoulette(chips, { serverSeed: s, clientSeed: c, nonce: n });
+        return { outcome: r.number, payout: r.payout };
+      },
+    },
+  ];
+
+  for (const [i, round] of (expire ? rounds.slice(0, 1) : rounds).entries()) {
     const state = (await fetchPlayer(program, p))!;
     const before = await tokenBalance(mint);
-    const amount = 5n * HROLL_UNIT;
     const clientSeed = createHash("sha256").update(`e2e-${i}-${Date.now()}`).digest("hex").slice(0, 16);
-    await send(
-      await program.methods
-        .placeBet(new BN(amount.toString()), 4950, toAnchorDirection("under"), clientSeed, fromHex(state.commitment))
-        .accountsPartial(accounts)
-        .instruction(),
-    );
-    check((await fetchPlayer(program, p))!.pending, `bet ${state.nonce} placed and escrowed`);
+    await send(await placeBetInstruction(program, p, mint, round.bet, clientSeed, state.commitment));
+    const placed = (await fetchPlayer(program, p))!;
+    check(placed.pending, `${round.bet.game} bet ${state.nonce} placed and escrowed`);
 
     if (expire) {
       const wait = cfg.settleTimeoutSecs.toNumber() + 2;
@@ -95,7 +125,7 @@ async function main() {
       await sleep(wait * 1000);
       await send(await program.methods.claimExpired().accountsPartial(accounts).instruction());
       const after = await tokenBalance(mint);
-      check(after === before - amount + payoutFor(amount, 4950, cfg.houseEdgeBps), "expired bet paid the full potential payout");
+      check(after === before - round.stake + placed.bet!.maxPayout, "expired bet paid the full potential payout");
       const s = (await fetchPlayer(program, p))!;
       check(s.nonce === state.nonce + 1 && /^0+$/.test(s.commitment), "nonce advanced and commitment cleared");
       return;
@@ -108,13 +138,13 @@ async function main() {
     }
     check(settled, `house settled bet ${state.nonce}`);
 
-    const entry = (await fetchBetHistory(connection, p, 10)).find((b) => b.nonce === state.nonce)!;
-    check(entry && entry.serverSeed, "settlement event found in the transaction history");
-    check(verifyCommitment(entry.serverSeed!, state.commitment), "revealed seed matches the commitment made before the bet");
-    const roll = computeRoll(entry.serverSeed!, clientSeed, state.nonce);
-    check(roll === entry.roll, `roll ${(roll / 100).toFixed(2)} reproduced off-chain with packages/fair`);
+    const entry: BetHistoryEntry | undefined = (await fetchBetHistory(connection, p, 10)).find((b) => b.nonce === state.nonce);
+    check(entry?.serverSeed, "settlement event found in the transaction history");
+    check(verifyCommitment(entry.serverSeed, state.commitment), "revealed seed matches the commitment made before the bet");
+    const ref = round.reference(entry.serverSeed, clientSeed, state.nonce);
+    check(ref.outcome === entry.outcome && ref.payout === entry.payout, `${round.bet.game} outcome ${entry.outcome} and payout reproduced off-chain with packages/fair`);
     const after = await tokenBalance(mint);
-    check(after === before - amount + entry.payout, `balance ${formatHroll(before)} → ${formatHroll(after)} (${entry.win ? "win" : "loss"})`);
+    check(after === before - round.stake + entry.payout, `balance ${formatHroll(before)} → ${formatHroll(after)}`);
   }
 }
 

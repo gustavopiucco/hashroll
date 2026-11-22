@@ -25,7 +25,16 @@ import {
   createMintToInstruction,
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
-import { computeRoll, payoutFor } from "@hashroll/fair";
+import {
+  computeRoll,
+  payoutFor,
+  plinkoMaxPayout,
+  resolvePlinko,
+  resolveRoulette,
+  rouletteMasks,
+  rouletteMaxPayout,
+  encodePlinkoPath,
+} from "@hashroll/fair";
 import {
   BN,
   BPF_LOADER_UPGRADEABLE_ID,
@@ -33,11 +42,12 @@ import {
   PROGRAM_ID,
   configPda,
   eventsToHistory,
-  fromHex,
+  playerAccounts,
+  placeBetInstruction,
   playerPda,
   readOnlyProgram,
-  toAnchorDirection,
   toHex,
+  type BetInput,
   toPlayerView,
   vaultPda,
 } from "../client/src/index.js";
@@ -175,14 +185,39 @@ class Env {
     return this.send([ix], [signer]);
   }
 
-  async placeBet(opts: { amount: bigint; target: number; direction: "under" | "over"; clientSeed: string; expected?: number[] }) {
-    const expected = opts.expected ?? fromHex(this.playerState()!.commitment);
-    const p = this.player.publicKey;
-    const ix = await program.methods
-      .placeBet(new BN(opts.amount.toString()), opts.target, toAnchorDirection(opts.direction), opts.clientSeed, expected)
-      .accountsPartial({ player: p, config: this.config, playerState: playerPda(p), mint: this.mint.publicKey, vault: this.vault, playerToken: this.ata(p) })
-      .instruction();
+  async placeBet(opts: { amount: bigint; target: number; direction: "under" | "over"; clientSeed: string; expected?: string }) {
+    return this.place({ game: "dice", amount: opts.amount, target: opts.target, direction: opts.direction }, opts.clientSeed, opts.expected);
+  }
+
+  async place(bet: BetInput, clientSeed: string, expected = this.playerState()!.commitment) {
+    const ix = await placeBetInstruction(program, this.player.publicKey, this.mint.publicKey, bet, clientSeed, expected);
     return this.send([ix], [this.player]);
+  }
+
+  async withdrawOwed() {
+    const ix = await program.methods.withdrawOwed().accountsPartial(playerAccounts(this.player.publicKey, this.mint.publicKey)).instruction();
+    return this.send([ix], [this.player]);
+  }
+
+  closePlayerTokenAccount() {
+    const p = this.player.publicKey;
+    this.send(
+      [
+        createTransferInstruction(this.ata(p), this.ata(this.admin.publicKey), p, this.balance(this.ata(p))),
+        createCloseAccountInstruction(this.ata(p), p, p),
+      ],
+      [this.player],
+    );
+    expect(this.svm.getAccount(this.ata(p))?.lamports ?? 0).toBe(0);
+  }
+
+  reopenPlayerTokenAccount() {
+    const p = this.player.publicKey;
+    this.send([createAssociatedTokenAccountIdempotentInstruction(p, this.ata(p), p, this.mint.publicKey)], [this.player]);
+  }
+
+  reserved() {
+    return BigInt(this.configAccount().reserved.toString());
   }
 
   async settle(serverSeed: string, nextSeed: string, signer = this.house, withPlayerToken = true) {
@@ -251,8 +286,8 @@ describe("betting round", () => {
     await env.placeBet({ amount: HROLL_UNIT, target: 5000, direction: "under", clientSeed: "player-seed" });
     const meta = await env.settle("hashroll-test-server-seed", seedFor("next"));
     const [entry] = eventsToHistory("sig", null, meta.logs(), env.player.publicKey);
-    expect(entry.roll).toBe(7338);
-    expect(entry.roll).toBe(computeRoll("hashroll-test-server-seed", "player-seed", 0));
+    expect(entry.outcome).toBe(7338);
+    expect(entry.outcome).toBe(computeRoll("hashroll-test-server-seed", "player-seed", 0));
     expect(entry.win).toBe(false);
   });
 
@@ -276,7 +311,8 @@ describe("betting round", () => {
       const [entry] = eventsToHistory("sig", null, meta.logs(), p);
       const roll = computeRoll(seeds[nonce], `client-${nonce}`, nonce);
       const win = direction === "under" ? roll < 4950 : roll >= 10_000 - 4950;
-      expect(entry).toMatchObject({ kind: "settled", nonce, roll, win, serverSeed: seeds[nonce], clientSeed: `client-${nonce}` });
+      expect(entry).toMatchObject({ kind: "settled", nonce, outcome: roll, win, serverSeed: seeds[nonce], clientSeed: `client-${nonce}` });
+      expect(entry.bet).toMatchObject({ game: "dice", target: 4950, direction, amount });
       expect(entry.payout).toBe(win ? payoutFor(amount, 4950, 100) : 0n);
 
       balance = balance - amount + entry.payout;
@@ -302,7 +338,7 @@ describe("betting round", () => {
     const env = await ready();
     await env.openPlayer(seedFor("a"));
     const base = { amount: HROLL_UNIT, target: 5000, direction: "under" as const, clientSeed: "c" };
-    await expectFail(env.placeBet({ ...base, expected: sha256("other") }), "CommitmentMismatch");
+    await expectFail(env.placeBet({ ...base, expected: toHex(sha256("other")) }), "CommitmentMismatch");
     await expectFail(env.placeBet({ ...base, target: 9900 }), "InvalidTarget");
     await expectFail(env.placeBet({ ...base, clientSeed: "a:b" }), "InvalidClientSeed");
     await expectFail(env.placeBet({ ...base, amount: 0n }), "ZeroAmount");
@@ -320,35 +356,121 @@ describe("betting round", () => {
   });
 });
 
-describe("blocking the reveal", () => {
-  it("a player who closes their token account cannot stop a losing bet from settling", async () => {
+describe("plinko", () => {
+  it("drops the ball exactly like packages/fair and pays the table multiplier", async () => {
     const env = await ready();
     const p = env.player.publicKey;
-    // Fixed vector: nonce 0 rolls 73.38, so "under 50.00" loses.
-    await env.openPlayer("hashroll-test-server-seed");
-    await env.placeBet({ amount: HROLL_UNIT, target: 5000, direction: "under", clientSeed: "player-seed" });
-    // Empty and close the token account so it no longer exists at settlement time.
-    env.send(
-      [
-        createTransferInstruction(env.ata(p), env.ata(env.admin.publicKey), p, env.balance(env.ata(p))),
-        createCloseAccountInstruction(env.ata(p), p, p),
-      ],
-      [env.player],
-    );
-    expect(env.svm.getAccount(env.ata(p))?.lamports ?? 0).toBe(0);
-    await env.settle("hashroll-test-server-seed", seedFor("next"), env.house, false);
-    expect(env.playerState()).toMatchObject({ pending: false, nonce: 1 });
-    expect(env.configAccount().reserved.toString()).toBe("0");
+    const seeds = Array.from({ length: 7 }, (_, i) => seedFor(`plinko-${i}`));
+    await env.openPlayer(seeds[0]);
+    const configs = [
+      { rows: 8, risk: "low" }, { rows: 12, risk: "medium" }, { rows: 16, risk: "high" },
+      { rows: 8, risk: "high" }, { rows: 16, risk: "low" }, { rows: 12, risk: "high" },
+    ] as const;
+    for (const [nonce, c] of configs.entries()) {
+      const amount = 2n * HROLL_UNIT;
+      const before = env.balance(env.ata(p));
+      await env.place({ game: "plinko", amount, ...c }, `c${nonce}`);
+      expect(env.reserved()).toBe(plinkoMaxPayout(amount, c.rows, c.risk));
+      const meta = await env.settle(seeds[nonce], seeds[nonce + 1]);
+      const [entry] = eventsToHistory("sig", null, meta.logs(), p);
+      const ref = resolvePlinko({ amount, ...c }, { serverSeed: seeds[nonce], clientSeed: `c${nonce}`, nonce });
+      expect(entry.outcome).toBe(encodePlinkoPath(ref.path));
+      expect(entry.payout).toBe(ref.payout);
+      expect(entry.bet).toMatchObject({ game: "plinko", rows: c.rows, risk: c.risk, amount });
+      expect(env.balance(env.ata(p))).toBe(before - amount + ref.payout);
+      expect(env.reserved()).toBe(0n);
+    }
   });
 
-  it("a win still needs the token account to be paid", async () => {
+  it("rejects unsupported rows and caps the 1000x edge by the bankroll limit", async () => {
     const env = await ready();
-    await env.openPlayer("hashroll-test-server-seed");
-    // Same roll (73.38) wins "over 50.00".
-    await env.placeBet({ amount: HROLL_UNIT, target: 5000, direction: "over", clientSeed: "player-seed" });
-    await expectFail(env.settle("hashroll-test-server-seed", seedFor("next"), env.house, false), "MissingPlayerToken");
-    await env.settle("hashroll-test-server-seed", seedFor("next"));
+    await env.openPlayer(seedFor("a"));
+    await expectFail(env.place({ game: "plinko", amount: HROLL_UNIT, rows: 10, risk: "low" }, "c"), "InvalidPlinko");
+    // 16 rows high risk pays up to 1000x; max profit is 10,000 HROLL, so 11 HROLL is too much.
+    await expectFail(env.place({ game: "plinko", amount: 11n * HROLL_UNIT, rows: 16, risk: "high" }, "c"), "ProfitTooHigh");
+    await env.place({ game: "plinko", amount: 10n * HROLL_UNIT, rows: 16, risk: "high" }, "c");
   });
+});
+
+describe("roulette", () => {
+  it("spins exactly like packages/fair and pays every winning chip", async () => {
+    const env = await ready();
+    const p = env.player.publicKey;
+    // Fixed vector: nonce 0 lands on 27 (red, odd, high, third dozen, third column).
+    await env.openPlayer("hashroll-test-server-seed");
+    const u = HROLL_UNIT;
+    const chips = [
+      { mask: rouletteMasks.straight(27), amount: 1n * u },
+      { mask: rouletteMasks.red(), amount: 2n * u },
+      { mask: rouletteMasks.black(), amount: 2n * u },
+      { mask: rouletteMasks.dozen(2), amount: 3n * u },
+      { mask: rouletteMasks.straight(0), amount: 1n * u },
+    ];
+    const before = env.balance(env.ata(p));
+    await env.place({ game: "roulette", chips }, "player-seed");
+    expect(env.balance(env.ata(p))).toBe(before - 9n * u);
+    expect(env.reserved()).toBe(rouletteMaxPayout(chips));
+    const meta = await env.settle("hashroll-test-server-seed", seedFor("next"));
+    const [entry] = eventsToHistory("sig", null, meta.logs(), p);
+    const ref = resolveRoulette(chips, { serverSeed: "hashroll-test-server-seed", clientSeed: "player-seed", nonce: 0 });
+    expect(ref.number).toBe(27);
+    expect(entry.outcome).toBe(27);
+    // straight 27 (36) + red (4) + dozen 3 (9) = 49 HROLL
+    expect(ref.payout).toBe(49n * u);
+    expect(entry.payout).toBe(ref.payout);
+    expect(entry.bet?.chips).toEqual(chips);
+    expect(env.balance(env.ata(p))).toBe(before - 9n * u + 49n * u);
+    expect(env.reserved()).toBe(0n);
+  });
+
+  it("validates the chips", async () => {
+    const env = await ready();
+    await env.openPlayer(seedFor("a"));
+    const chip = { mask: rouletteMasks.red(), amount: HROLL_UNIT };
+    await expectFail(env.place({ game: "roulette", chips: [] }, "c"), "InvalidRouletteBet");
+    await expectFail(env.place({ game: "roulette", chips: Array(9).fill(chip) }, "c"), "InvalidRouletteBet");
+    await expectFail(env.place({ game: "roulette", chips: [{ ...chip, mask: 1n << 37n }] }, "c"), "InvalidRouletteBet");
+    await expectFail(env.place({ game: "roulette", chips: [{ ...chip, mask: (1n << 37n) - 1n }] }, "c"), "InvalidRouletteBet");
+    await expectFail(env.place({ game: "roulette", chips: [{ ...chip, amount: 0n }] }, "c"), "InvalidRouletteBet");
+    await env.place({ game: "roulette", chips: Array(8).fill(chip) }, "c");
+  });
+});
+
+describe("blocking the reveal", () => {
+  // A player who closes their token account must not be able to stop any outcome from settling
+  // (and then claim the full payout at the timeout). Every game settles without it.
+  const cases: [string, BetInput, string][] = [
+    // Fixed vector nonce 0: roll 73.38, roulette 27, plinko path of the same digest.
+    ["dice loss", { game: "dice", amount: HROLL_UNIT, target: 5000, direction: "under" }, "player-seed"],
+    ["dice win", { game: "dice", amount: HROLL_UNIT, target: 5000, direction: "over" }, "player-seed"],
+    ["plinko", { game: "plinko", amount: HROLL_UNIT, rows: 16, risk: "low" }, "player-seed"],
+    ["roulette win", { game: "roulette", chips: [{ mask: rouletteMasks.red(), amount: HROLL_UNIT }] }, "player-seed"],
+  ];
+  for (const [name, bet, clientSeed] of cases) {
+    it(`${name}: settles with the token account closed and credits the payout to owed`, async () => {
+      const env = await ready();
+      await env.openPlayer("hashroll-test-server-seed");
+      await env.place(bet, clientSeed);
+      env.closePlayerTokenAccount();
+      const meta = await env.settle("hashroll-test-server-seed", seedFor("next"), env.house, false);
+      const [entry] = eventsToHistory("sig", null, meta.logs(), env.player.publicKey);
+      const state = env.playerState()!;
+      expect(state).toMatchObject({ pending: false, nonce: 1 });
+      expect(entry.credited).toBe(entry.payout > 0n);
+      expect(state.owed).toBe(entry.payout);
+      // Owed funds stay reserved until the player withdraws them.
+      expect(env.reserved()).toBe(entry.payout);
+
+      env.reopenPlayerTokenAccount();
+      if (entry.payout > 0n) {
+        await env.withdrawOwed();
+        expect(env.balance(env.ata(env.player.publicKey))).toBe(entry.payout);
+        expect(env.playerState()!.owed).toBe(0n);
+        expect(env.reserved()).toBe(0n);
+      }
+      await expectFail(env.withdrawOwed(), "NothingOwed");
+    });
+  }
 });
 
 describe("timeout", () => {

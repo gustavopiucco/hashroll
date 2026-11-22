@@ -6,7 +6,7 @@ import { HouseService } from './house.service.js';
 /**
  * Settles pending bets as soon as they land. A log subscription gives the fast path;
  * a periodic sweep catches anything missed (API restart, dropped websocket, failed tx).
- * Every bet that is not settled within the on-chain timeout pays the player in full,
+ * Every bet that is not settled within the on-chain timeout pays the player its maximum payout,
  * so this loop must stay up.
  */
 @Injectable()
@@ -22,7 +22,7 @@ export class SettlerService implements OnModuleInit, OnModuleDestroy {
   onModuleInit() {
     if (!config.settlerEnabled) return;
     this.subscription = this.house.connection.onLogs(PROGRAM_ID, (l) => {
-      if (l.logs.some((line) => line.includes('Instruction: PlaceBet') || line.includes('Instruction: ClaimExpired'))) {
+      if (l.logs.some((line) => line.includes('Instruction: Place') || line.includes('Instruction: ClaimExpired'))) {
         void this.sweep();
       }
     });

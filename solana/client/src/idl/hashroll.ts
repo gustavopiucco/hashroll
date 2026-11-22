@@ -540,20 +540,21 @@ export type Hashroll = {
       ]
     },
     {
-      "name": "placeBet",
+      "name": "placeDice",
       "docs": [
-        "Escrows the stake and locks the bet against the current commitment.",
-        "`expected_commitment` must match, so the bet fails instead of silently using another seed."
+        "Dice: wins if the roll (0..9999) is under `target` (or at least 10000 - target for `Over`).",
+        "`expected_commitment` must match the stored one, so the bet fails instead of silently using",
+        "another seed. The same holds for every `place_*` instruction."
       ],
       "discriminator": [
-        222,
-        62,
-        67,
-        220,
-        63,
-        166,
-        126,
-        33
+        241,
+        186,
+        143,
+        178,
+        147,
+        92,
+        146,
+        187
       ],
       "accounts": [
         {
@@ -641,6 +642,241 @@ export type Hashroll = {
           "type": {
             "defined": {
               "name": "direction"
+            }
+          }
+        },
+        {
+          "name": "clientSeed",
+          "type": "string"
+        },
+        {
+          "name": "expectedCommitment",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "placePlinko",
+      "docs": [
+        "Plinko: `rows` bounces (8, 12 or 16), one bit of the digest each; the slot is the number of",
+        "right bounces and pays the multiplier of the fixed table for `rows` and `risk`."
+      ],
+      "discriminator": [
+        84,
+        226,
+        82,
+        4,
+        29,
+        111,
+        210,
+        127
+      ],
+      "accounts": [
+        {
+          "name": "player",
+          "signer": true,
+          "relations": [
+            "playerState"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "playerState",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  121,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mint",
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "playerToken",
+          "writable": true
+        },
+        {
+          "name": "tokenProgram",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "rows",
+          "type": "u8"
+        },
+        {
+          "name": "risk",
+          "type": {
+            "defined": {
+              "name": "plinkoRisk"
+            }
+          }
+        },
+        {
+          "name": "clientSeed",
+          "type": "string"
+        },
+        {
+          "name": "expectedCommitment",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "placeRoulette",
+      "docs": [
+        "European roulette: up to 8 chips, each covering a set of numbers (37-bit mask) and paying",
+        "amount * 36 / covered. The stake is the sum of the chips; the reserve is the best case",
+        "over the 37 numbers."
+      ],
+      "discriminator": [
+        217,
+        157,
+        145,
+        11,
+        84,
+        23,
+        78,
+        70
+      ],
+      "accounts": [
+        {
+          "name": "player",
+          "signer": true,
+          "relations": [
+            "playerState"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "playerState",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  121,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mint",
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "playerToken",
+          "writable": true
+        },
+        {
+          "name": "tokenProgram",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "chips",
+          "type": {
+            "vec": {
+              "defined": {
+                "name": "rouletteChip"
+              }
             }
           }
         },
@@ -939,7 +1175,7 @@ export type Hashroll = {
         {
           "name": "playerToken",
           "docs": [
-            "Optional: only needed when the roll wins (see `settle_bet`)."
+            "Optional: without it a payout is credited to `owed` (see `settle_bet`)."
           ],
           "writable": true,
           "optional": true
@@ -964,6 +1200,95 @@ export type Hashroll = {
           }
         }
       ]
+    },
+    {
+      "name": "withdrawOwed",
+      "docs": [
+        "Withdraws payouts that were credited because the player's token account was missing at settlement."
+      ],
+      "discriminator": [
+        110,
+        222,
+        234,
+        254,
+        112,
+        86,
+        192,
+        66
+      ],
+      "accounts": [
+        {
+          "name": "player",
+          "signer": true,
+          "relations": [
+            "playerState"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "playerState",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  121,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mint",
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "playerToken",
+          "writable": true
+        },
+        {
+          "name": "tokenProgram",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": []
     }
   ],
   "accounts": [
@@ -1084,6 +1409,19 @@ export type Hashroll = {
         74,
         50,
         59
+      ]
+    },
+    {
+      "name": "owedWithdrawn",
+      "discriminator": [
+        5,
+        182,
+        86,
+        222,
+        137,
+        212,
+        104,
+        229
       ]
     },
     {
@@ -1209,8 +1547,18 @@ export type Hashroll = {
     },
     {
       "code": 6016,
-      "name": "missingPlayerToken",
-      "msg": "The player's token account is required to pay a win"
+      "name": "invalidPlinko",
+      "msg": "Plinko rows must be 8, 12 or 16"
+    },
+    {
+      "code": 6017,
+      "name": "invalidRouletteBet",
+      "msg": "Roulette: 1 to 8 chips, each with an amount and a mask of 1 to 36 numbers (0-36)"
+    },
+    {
+      "code": 6018,
+      "name": "nothingOwed",
+      "msg": "Nothing to withdraw"
     }
   ],
   "types": [
@@ -1282,6 +1630,14 @@ export type Hashroll = {
             "type": "string"
           },
           {
+            "name": "game",
+            "type": {
+              "defined": {
+                "name": "game"
+              }
+            }
+          },
+          {
             "name": "amount",
             "type": "u64"
           },
@@ -1298,7 +1654,29 @@ export type Hashroll = {
             }
           },
           {
-            "name": "potentialPayout",
+            "name": "rows",
+            "type": "u8"
+          },
+          {
+            "name": "risk",
+            "type": {
+              "defined": {
+                "name": "plinkoRisk"
+              }
+            }
+          },
+          {
+            "name": "chips",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "rouletteChip"
+                }
+              }
+            }
+          },
+          {
+            "name": "maxPayout",
             "type": "u64"
           }
         ]
@@ -1335,6 +1713,14 @@ export type Hashroll = {
             "type": "string"
           },
           {
+            "name": "game",
+            "type": {
+              "defined": {
+                "name": "game"
+              }
+            }
+          },
+          {
             "name": "amount",
             "type": "u64"
           },
@@ -1351,16 +1737,47 @@ export type Hashroll = {
             }
           },
           {
-            "name": "roll",
-            "type": "u16"
+            "name": "rows",
+            "type": "u8"
           },
           {
-            "name": "win",
-            "type": "bool"
+            "name": "risk",
+            "type": {
+              "defined": {
+                "name": "plinkoRisk"
+              }
+            }
+          },
+          {
+            "name": "chips",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "rouletteChip"
+                }
+              }
+            }
+          },
+          {
+            "name": "outcome",
+            "docs": [
+              "Dice roll (0..9999), Plinko path bits (bit i = row i, 1 = right) or Roulette number (0..36)."
+            ],
+            "type": "u32"
           },
           {
             "name": "payout",
+            "docs": [
+              "Gross payout (0 on a loss; Plinko can pay less than the stake)."
+            ],
             "type": "u64"
+          },
+          {
+            "name": "credited",
+            "docs": [
+              "True when the payout went to `owed` because the player's token account was missing."
+            ],
+            "type": "bool"
           },
           {
             "name": "nextCommitment",
@@ -1474,6 +1891,23 @@ export type Hashroll = {
       }
     },
     {
+      "name": "game",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "dice"
+          },
+          {
+            "name": "plinko"
+          },
+          {
+            "name": "roulette"
+          }
+        ]
+      }
+    },
+    {
       "name": "houseDefunded",
       "type": {
         "kind": "struct",
@@ -1513,6 +1947,22 @@ export type Hashroll = {
           {
             "name": "house",
             "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "owedWithdrawn",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
           }
         ]
       }
@@ -1586,15 +2036,32 @@ export type Hashroll = {
             "type": "bool"
           },
           {
+            "name": "betGame",
+            "type": {
+              "defined": {
+                "name": "game"
+              }
+            }
+          },
+          {
             "name": "betAmount",
+            "docs": [
+              "Total stake (for Roulette, the sum of the chips)."
+            ],
             "type": "u64"
           },
           {
             "name": "betTarget",
+            "docs": [
+              "Dice only."
+            ],
             "type": "u16"
           },
           {
             "name": "betDirection",
+            "docs": [
+              "Dice only."
+            ],
             "type": {
               "defined": {
                 "name": "direction"
@@ -1602,7 +2069,41 @@ export type Hashroll = {
             }
           },
           {
-            "name": "betPayout",
+            "name": "betRows",
+            "docs": [
+              "Plinko only."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "betRisk",
+            "docs": [
+              "Plinko only."
+            ],
+            "type": {
+              "defined": {
+                "name": "plinkoRisk"
+              }
+            }
+          },
+          {
+            "name": "betChips",
+            "docs": [
+              "Roulette only."
+            ],
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "rouletteChip"
+                }
+              }
+            }
+          },
+          {
+            "name": "betMaxPayout",
+            "docs": [
+              "Best-case payout, reserved against the vault and paid in full by `claim_expired`."
+            ],
             "type": "u64"
           },
           {
@@ -1614,8 +2115,54 @@ export type Hashroll = {
             "type": "string"
           },
           {
+            "name": "owed",
+            "docs": [
+              "Payouts credited when the player's token account was missing at settlement (still reserved)."
+            ],
+            "type": "u64"
+          },
+          {
             "name": "bump",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "plinkoRisk",
+      "docs": [
+        "Index into the Plinko tables of `fair.rs` (low = 0, medium = 1, high = 2)."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "low"
+          },
+          {
+            "name": "medium"
+          },
+          {
+            "name": "high"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rouletteChip",
+      "docs": [
+        "One roulette chip: covers the numbers set in `mask` (bit i = number i)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mask",
+            "type": "u64"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
           }
         ]
       }

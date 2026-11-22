@@ -5,7 +5,7 @@
 import { Buffer } from "buffer";
 import BNImpl from "bn.js";
 import { BorshCoder, EventParser, Program, type Provider } from "@coral-xyz/anchor";
-import { Connection, PublicKey } from "@solana/web3.js";
+import { Connection, PublicKey, type TransactionInstruction } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import idlJson from "./idl/hashroll.json" with { type: "json" };
 import type { Hashroll } from "./idl/hashroll.js";
@@ -37,6 +37,9 @@ export const HROLL_UNIT = 10n ** BigInt(HROLL_DECIMALS);
 export const PENDING_OFFSET = 80;
 
 export type Direction = "under" | "over";
+export type Game = "dice" | "plinko" | "roulette";
+export type PlinkoRisk = "low" | "medium" | "high";
+export const GAMES: readonly Game[] = ["dice", "plinko", "roulette"];
 
 /* --------------------------------------------------------------- addresses */
 
@@ -78,7 +81,62 @@ export function readOnlyProgram(connection: Connection): Program<Hashroll> {
 }
 
 export const toAnchorDirection = (d: Direction) => (d === "over" ? { over: {} } : { under: {} });
-export const fromAnchorDirection = (d: object): Direction => ("over" in d ? "over" : "under");
+/**
+ * Anchor enums decode as `{ variant: {} }`. The account coder camelCases the variant name but the
+ * event coder keeps the IDL's spelling (`Over`, `Plinko`), so compare case-insensitively.
+ */
+const variant = (e: object) => Object.keys(e)[0]?.toLowerCase() ?? "";
+export const fromAnchorDirection = (d: object): Direction => (variant(d) === "over" ? "over" : "under");
+export const toAnchorRisk = (r: PlinkoRisk) => ({ [r]: {} }) as { low: {} } | { medium: {} } | { high: {} };
+export const fromAnchorRisk = (r: object): PlinkoRisk => {
+  const v = variant(r);
+  return v === "high" || v === "medium" ? v : "low";
+};
+export const fromAnchorGame = (g: object): Game => {
+  const v = variant(g);
+  return v === "plinko" || v === "roulette" ? v : "dice";
+};
+
+/** What the player bets on. Amounts are HROLL base units. */
+export type BetInput =
+  | { game: "dice"; amount: bigint; target: number; direction: Direction }
+  | { game: "plinko"; amount: bigint; rows: number; risk: PlinkoRisk }
+  | { game: "roulette"; chips: { mask: bigint; amount: bigint }[] };
+
+/** Accounts of every `place_*` instruction (also `claim_expired` and `withdraw_owed`). */
+export function playerAccounts(player: PublicKey, mint: PublicKey, programId = PROGRAM_ID) {
+  return {
+    player,
+    config: configPda(programId),
+    playerState: playerPda(player, programId),
+    mint,
+    vault: vaultPda(programId),
+    playerToken: playerTokenAccount(mint, player),
+  };
+}
+
+const bn = (v: bigint) => new BN(v.toString());
+
+/** Builds the `place_*` instruction for a bet against the commitment the player saw (hex). */
+export async function placeBetInstruction(
+  program: Program<Hashroll>,
+  player: PublicKey,
+  mint: PublicKey,
+  bet: BetInput,
+  clientSeed: string,
+  commitmentHex: string,
+): Promise<TransactionInstruction> {
+  const expected = fromHex(commitmentHex);
+  const accounts = playerAccounts(player, mint, program.programId);
+  const m = program.methods;
+  const builder =
+    bet.game === "dice"
+      ? m.placeDice(bn(bet.amount), bet.target, toAnchorDirection(bet.direction), clientSeed, expected)
+      : bet.game === "plinko"
+        ? m.placePlinko(bn(bet.amount), bet.rows, toAnchorRisk(bet.risk), clientSeed, expected)
+        : m.placeRoulette(bet.chips.map((c) => ({ mask: bn(c.mask), amount: bn(c.amount) })), clientSeed, expected);
+  return builder.accountsPartial(accounts).instruction();
+}
 
 /* --------------------------------------------------------------- formatting */
 
@@ -111,22 +169,47 @@ export function parseHroll(value: string): bigint {
 
 /* ------------------------------------------------------------------- state */
 
+/** A bet as stored on-chain. Fields of the other games are zero/empty. */
+export interface BetDetails {
+  game: Game;
+  amount: bigint; // total stake
+  target: number; // dice
+  direction: Direction; // dice
+  rows: number; // plinko
+  risk: PlinkoRisk; // plinko
+  chips: { mask: bigint; amount: bigint }[]; // roulette
+}
+
 export interface PlayerView {
   player: string;
   nonce: number;
   commitment: string; // hex; all zeros = the house has not committed yet
   pending: boolean;
-  bet: null | {
-    amount: bigint;
-    target: number;
-    direction: Direction;
-    potentialPayout: bigint;
+  /** Payouts credited while the player's token account was missing; see `withdraw_owed`. */
+  owed: bigint;
+  bet: null | (BetDetails & {
+    maxPayout: bigint; // reserved; paid in full by claim_expired
     placedAt: number; // unix seconds
     clientSeed: string;
-  };
+  });
 }
 
 type PlayerAccount = Awaited<ReturnType<Program<Hashroll>["account"]["playerState"]["fetch"]>>;
+
+const n = (v: { toString(): string }) => Number(v.toString());
+const big = (v: { toString(): string }) => BigInt(v.toString());
+
+function betDetails(d: { game: object; amount: unknown; target: number; direction: object; rows: number; risk: object; chips: { mask: unknown; amount: unknown }[] }): BetDetails {
+  return {
+    game: fromAnchorGame(d.game),
+    amount: big(d.amount as BN),
+    target: d.target,
+    direction: fromAnchorDirection(d.direction),
+    rows: d.rows,
+    risk: fromAnchorRisk(d.risk),
+    chips: d.chips.map((c) => ({ mask: big(c.mask as BN), amount: big(c.amount as BN) })),
+  };
+}
 
 export function toPlayerView(a: PlayerAccount): PlayerView {
   return {
@@ -134,12 +217,11 @@ export function toPlayerView(a: PlayerAccount): PlayerView {
     nonce: a.nonce.toNumber(),
     commitment: toHex(a.commitment),
     pending: a.pending,
+    owed: big(a.owed),
     bet: a.pending
       ? {
-          amount: BigInt(a.betAmount.toString()),
-          target: a.betTarget,
-          direction: fromAnchorDirection(a.betDirection),
-          potentialPayout: BigInt(a.betPayout.toString()),
+          ...betDetails({ game: a.betGame, amount: a.betAmount, target: a.betTarget, direction: a.betDirection, rows: a.betRows, risk: a.betRisk, chips: a.betChips }),
+          maxPayout: big(a.betMaxPayout),
           placedAt: a.betPlacedAt.toNumber(),
           clientSeed: a.betClientSeed,
         }
@@ -162,12 +244,14 @@ export interface BetHistoryEntry {
   commitment: string;
   serverSeed: string | null; // null when the bet expired (seed never revealed)
   clientSeed: string | null;
-  amount: bigint | null;
-  target: number | null;
-  direction: Direction | null;
-  roll: number | null;
-  win: boolean;
+  bet: BetDetails | null; // null when expired (the event only carries the payout)
+  /** Dice roll (0..9999), Plinko path bits (bit i = row i, 1 = right) or Roulette number (0..36). */
+  outcome: number | null;
   payout: bigint;
+  /** The payout went to `owed` because the player's token account was missing. */
+  credited: boolean;
+  /** Payout above the stake (expired bets always pay the maximum). */
+  win: boolean;
 }
 
 const coder = new BorshCoder(IDL);
@@ -177,9 +261,6 @@ export function parseEvents(logs: string[], programId = PROGRAM_ID) {
   return Array.from(new EventParser(programId, coder).parseLogs(logs));
 }
 
-const n = (v: { toString(): string }) => Number(v.toString());
-const big = (v: { toString(): string }) => BigInt(v.toString());
-
 export function eventsToHistory(signature: string, blockTime: number | null, logs: string[], player: PublicKey, programId = PROGRAM_ID): BetHistoryEntry[] {
   const out: BetHistoryEntry[] = [];
   for (const ev of parseEvents(logs, programId)) {
@@ -187,20 +268,21 @@ export function eventsToHistory(signature: string, blockTime: number | null, log
     if (!(d.player instanceof PublicKey) || !d.player.equals(player)) continue;
     const name = ev.name.toLowerCase();
     if (name === "betsettled") {
+      const bet = betDetails(d as Parameters<typeof betDetails>[0]);
+      const payout = big(d.payout);
       out.push({
         signature, blockTime, kind: "settled",
         nonce: n(d.nonce), commitment: toHex(d.commitment),
         // Anchor's event coder keeps the IDL's snake_case field names.
         serverSeed: d.server_seed, clientSeed: d.client_seed,
-        amount: big(d.amount), target: d.target, direction: fromAnchorDirection(d.direction),
-        roll: d.roll, win: d.win, payout: big(d.payout),
+        bet, outcome: d.outcome, payout, credited: d.credited, win: payout > bet.amount,
       });
     } else if (name === "betexpired") {
       out.push({
         signature, blockTime, kind: "expired",
         nonce: n(d.nonce), commitment: toHex(d.commitment),
-        serverSeed: null, clientSeed: null, amount: null, target: null, direction: null, roll: null,
-        win: true, payout: big(d.payout),
+        serverSeed: null, clientSeed: null, bet: null, outcome: null,
+        payout: big(d.payout), credited: false, win: true,
       });
     }
   }
