@@ -43,12 +43,12 @@ hashroll/
 Dependency direction:
 
 ```
-packages/fair  ◀──  solana/client  ◀──  apps/api
-      ▲                   ▲
-      └──── apps/web ─────┘
+packages/fair  ◀──  apps/web  ──▶  solana/client  ◀──  apps/api
 
 solana/programs/hashroll/src/fair.rs  ≡  packages/fair  (same spec, checked by shared test vectors)
 ```
+
+`solana/client` does not depend on `packages/fair`. The program tests, the end-to-end script and the API's seed tests import `packages/fair` as an independent reference.
 
 ---
 
@@ -106,7 +106,8 @@ Field order in `PlayerState` matters: the API finds pending bets with a `memcmp`
 | Admin | `initialize` | upgrade authority | Create `Config` and the vault |
 | | `set_params`, `set_house`, `set_paused` | admin | Tune parameters, rotate the house key, pause |
 | | `propose_admin` / `accept_admin` | admin / new admin | Two-step admin transfer |
-| | `fund_house` / `defund_house` | admin | Move HROLL into / out of the free bankroll (never `reserved`) |
+| | `fund_house` | anyone | Add HROLL to the bankroll |
+| | `defund_house` | admin | Withdraw HROLL from the free bankroll (never `reserved`) |
 | House | `open_player` | house | Create a `PlayerState` with the first commitment |
 | | `commit_seed` | house | Store the commitment for the next bet |
 | | `settle_bet` | house | Reveal the seed, compute the outcome, pay |
@@ -131,7 +132,7 @@ The web app uses it for previews (multiplier, profit) and for the `/verify` page
 
 ### `solana/client` (`@hashroll/program`)
 
-Shared glue for the API, the web app and the tests: the typed IDL, `PROGRAM_ID`, PDA helpers (`configPda`, `vaultPda`, `playerPda`, `playerAccounts`), instruction builders (`placeBetInstruction`), account readers (`fetchPlayer`), bet history parsing from `BetSettled` events (`fetchBetHistory`), and HROLL formatting (`formatHroll`, `parseHroll`; 9 decimals).
+Shared glue for the API, the web app and the tests: the typed IDL, `PROGRAM_ID`, PDA helpers (`configPda`, `vaultPda`, `playerPda`, `playerAccounts`), instruction builders (`placeBetInstruction`), account readers (`fetchPlayer`), bet history parsing from `BetSettled` and `BetExpired` events (`fetchBetHistory`), and HROLL formatting (`formatHroll`, `parseHroll`; 9 decimals).
 
 ---
 
@@ -141,10 +142,12 @@ A small NestJS app. It is **stateless**: everything it needs is either on-chain 
 
 | File | Role |
 |---|---|
-| `config.ts` | Reads `.env` (RPC URL, house key, `HOUSE_SEED_SECRET`, `SETTLER_ENABLED`) |
+| `main.ts` | Loads the root `.env` and starts the server |
+| `config.ts` | Settings from the environment (RPC URL, house and faucet keys, `HOUSE_SEED_SECRET`, `SETTLER_ENABLED`) |
 | `house/players.controller.ts` | `GET /house`, `POST /players/:addr/open`, `POST /players/:addr/dev/faucet` |
 | `house/house.service.ts` | Signs transactions with the house key: open player, commit seed, settle, faucet; queries pending bets |
 | `house/seeds.ts` | Derives each server seed deterministically: `HMAC_SHA256(HOUSE_SEED_SECRET, genesisHash:programId:player:nonce)` |
+| `house/token-account.ts` | Checks that the player's token account can receive a payout; otherwise the settlement omits it and any payout goes to `owed` |
 | `house/settler.service.ts` | The settlement loop |
 
 **Settler loop.** Two triggers feed the same `sweep()`:
@@ -169,9 +172,16 @@ Next.js 16 with Tailwind 4 and the Solana wallet adapter. The web app reads bala
 | `src/app/{dice,plinko,roulette}/page.tsx` | One page per game, built on `components/GameShell.tsx` |
 | `src/games/*Stage.ts` | PixiJS scenes, mounted by `usePixiStage.ts`; Dice is a 2.5D 0–100 lane with a draggable gate |
 | `src/app/verify/page.tsx` | Independent verifier: recomputes any bet with `@hashroll/fair` in the browser, no API call |
-| `src/lib/sound.ts`, `effects.ts`, `fx.ts` | Sound and celebration effects |
+| `src/games/fx.ts` | Particle and shockwave effects, plus easing helpers, for the PixiJS stages |
+| `src/lib/sound.ts`, `src/lib/effects.ts` | Sound and celebration effects |
 
-The animation **only replays** the outcome read from the chain. A stage exposes `roll()` (spin while waiting) and `reveal(outcome, win)` (land on the real result).
+The animation **only replays** the outcome read from the chain. Each stage has a method that animates while the house reveals the seed and one that lands on the real result:
+
+| Stage | While waiting | Result |
+|---|---|---|
+| Dice | `roll()` | `reveal(roll, win)` |
+| Plinko | `wait()` | `drop(path, rows, risk)` |
+| Roulette | `spin()` | `land(number)` |
 
 Transactions are signed by the wallet but submitted through the app's own RPC, so the wallet's selected network does not matter.
 
@@ -214,9 +224,9 @@ Transactions are signed by the wallet but submitted through the app's own RPC, s
 
    The wallet signs it. On-chain, the program:
    - checks that `expectedCommitment` matches the stored one, so the bet fails instead of silently using another seed;
-   - transfers the stake to the vault;
    - computes the bet's **maximum payout** over every possible outcome and checks it against the profit cap;
-   - adds it to `Config.reserved`.
+   - transfers the stake to the vault;
+   - adds the maximum payout to `Config.reserved`.
 
 3. **Settle.** The settler derives the seed for `(player, nonce)` and sends `settle_bet(serverSeed, nextCommitment)`. The program:
    - verifies `SHA256(serverSeed) == commitment`;
@@ -226,11 +236,11 @@ Transactions are signed by the wallet but submitted through the app's own RPC, s
    - emits `BetSettled`, which carries the now-public seed;
    - increments `nonce` and stores `nextCommitment`.
 
-4. **Display.** The web app polls `PlayerState` every 500 ms until `nonce` increases, reads the bet from `BetSettled` via `fetchBetHistory`, and calls `stage.reveal(outcome, win)`. It then rotates the client seed.
+4. **Display.** The web app polls `PlayerState` every 500 ms until `nonce` increases, reads the bet from `BetSettled` via `fetchBetHistory`, rotates the client seed, and plays the stage's result animation (see section 7).
 
 5. **Timeout (unhappy path).** If the house does not settle within `settle_timeout_secs` (60 s locally), the player calls `claim_expired` and receives the **full maximum payout**. Withholding an unfavourable reveal therefore never pays off for the house.
 
-6. **Verify.** Every history entry links to `/verify`, which recomputes the commitment check and the outcome locally from the revealed seed, client seed and nonce.
+6. **Verify.** Every settled bet in the history links to `/verify` (expired bets do not, since their seed was never revealed), which recomputes the commitment check and the outcome locally from the revealed seed, client seed and nonce.
 
 ### Why nobody can steer the outcome
 
@@ -268,7 +278,7 @@ Transactions are signed by the wallet but submitted through the app's own RPC, s
 
 ```bash
 npm run build:program   # build the Anchor program in Docker (also runs fair.rs unit tests)
-npm run dev:infra       # local validator
+npm run dev:infra       # local validator (+ Postgres, not used yet)
 npm run deploy:local    # deploy, create HROLL, initialize and fund the house
 npm run dev:api         # house + settler on :4000
 npm run dev:web         # UI on :3000
@@ -279,6 +289,6 @@ npm run dev:web         # UI on :3000
 | `npm run test:fair` | Provably Fair vectors and a cross-check against `node:crypto` |
 | `npm run test:program` | Program integration tests in LiteSVM |
 | `npm test -w @hashroll/api` | Seed derivation and token account helpers |
-| `npm run e2e:local -w @hashroll/program` | One live round per game against the local stack (`-- --expire` tests the timeout path) |
+| `npm run e2e:local -w @hashroll/program` | One live round per game against the local stack (`-- --expire` tests the timeout path; run the API with `SETTLER_ENABLED=false`) |
 
 Restarting the `solana` container resets the chain; run `npm run deploy:local` again afterwards. Addresses stay the same because the dev keypairs are committed.
