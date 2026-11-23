@@ -10,6 +10,11 @@ import {
   digestToPlinkoPath,
   digestToRoll,
   digestToRouletteNumber,
+  digestToSlotGrid,
+  SLOT_SYMBOLS,
+  SLOT_LINES,
+  BPS,
+  slotWins,
   plinkoSlot,
   plinkoTable,
   rouletteColor,
@@ -17,7 +22,8 @@ import {
   type PlinkoRisk,
 } from "@hashroll/fair";
 import { fmtMultiplier, fmtRoll, GAME_LABEL } from "@/lib/format";
-import type { Game } from "@hashroll/program";
+import { GAMES, type Game } from "@hashroll/program";
+import { SlotIcon } from "@/components/SlotIcon";
 
 /**
  * 100% client-side verifier: uses exactly the same code as the on-chain program's specification
@@ -32,6 +38,7 @@ export default function VerifyPage() {
         <div>Dice: roll = floor(n × 10000 / 2³²) / 100</div>
         <div>Roulette: number = floor(n × 37 / 2³²)</div>
         <div>Plinko: row i goes right iff bit i of the digest is 1; slot = right bounces</div>
+        <div>Slots: cell i of the 3×3 grid reads byte i of the digest; the symbol is the first whose cumulative weight exceeds it</div>
       </div>
       <p className="text-sm text-white/60">
         Each bet uses its own server seed. Its hash was stored on-chain before you bet, and the program refused to settle unless the revealed seed
@@ -46,7 +53,7 @@ export default function VerifyPage() {
 
 function VerifyForm() {
   const params = useSearchParams();
-  const [game, setGame] = useState<Game>((["dice", "plinko", "roulette"] as const).find((g) => g === params.get("game")) ?? "dice");
+  const [game, setGame] = useState<Game>(GAMES.find((g) => g === params.get("game")) ?? "dice");
   const [serverSeed, setServerSeed] = useState(params.get("serverSeed") ?? "");
   const [commitment, setCommitment] = useState(params.get("commitment") ?? "");
   const [clientSeed, setClientSeed] = useState(params.get("clientSeed") ?? "");
@@ -86,7 +93,7 @@ function VerifyForm() {
   return (
     <>
       <div className="flex flex-wrap gap-3 items-center">
-        {toggle(["dice", "plinko", "roulette"] as const, game, setGame, (g) => GAME_LABEL[g])}
+        {toggle(GAMES, game, setGame, (g) => GAME_LABEL[g])}
         {game === "plinko" && (
           <>
             {toggle(PLINKO_ROWS, rows as (typeof PLINKO_ROWS)[number], setRows, (r) => `${r} rows`)}
@@ -137,6 +144,24 @@ function Outcome(props: { game: Game; digest: string; rows: number; risk: Plinko
     return (
       <div className="text-4xl">
         {n} <span className="text-base text-white/60">{rouletteColor(n)}</span>
+      </div>
+    );
+  }
+  if (game === "slots") {
+    const grid = digestToSlotGrid(digest);
+    const { lines, fullBoard, units } = slotWins(grid);
+    return (
+      <div className="flex flex-col gap-2">
+        <div className="grid w-max grid-cols-3 gap-1">
+          {grid.map((s, i) => (
+            <SlotIcon key={i} symbol={s} className="h-12 w-12 rounded-lg bg-white/10 p-1.5" />
+          ))}
+        </div>
+        <div className="text-white/60">
+          {lines.map((l) => `line ${l.line + 1}: ${SLOT_SYMBOLS[l.symbol]} ×${l.pay}`).join(" · ") || "no winning line"}
+          {fullBoard && " · full board ×10"}
+        </div>
+        <div className="text-4xl">{fmtMultiplier((units * Number(BPS)) / SLOT_LINES.length)}</div>
       </div>
     );
   }

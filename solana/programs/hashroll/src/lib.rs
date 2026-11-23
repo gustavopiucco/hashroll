@@ -1,9 +1,10 @@
-//! Hashroll: provably fair casino games (Dice, Plinko, Roulette), fully on-chain on Solana.
+//! Hashroll: provably fair casino games (Dice, Plinko, Roulette, Slots), fully on-chain on Solana.
 //!
 //! Flow (one pending bet per player, whatever the game):
 //!   1. `open_player`: the house creates the player's account with a commitment = SHA256(serverSeed).
-//!   2. `place_dice` / `place_plinko` / `place_roulette`: the player escrows the stake in the vault
-//!      and supplies a fresh client seed. The maximum payout is reserved so the house can always pay.
+//!   2. `place_dice` / `place_plinko` / `place_roulette` / `place_slots`: the player escrows the
+//!      stake in the vault and supplies a fresh client seed. The maximum payout is reserved so the
+//!      house can always pay.
 //!   3. `settle_bet`: the house reveals serverSeed. The program checks it against the commitment,
 //!      computes the outcome with exactly the same rules as `packages/fair`, pays out and stores
 //!      the commitment for the next bet. Every server seed is used for a single bet. If the player's
@@ -305,6 +306,23 @@ pub mod hashroll {
         Ok(())
     }
 
+    /// Slots: a 3x3 grid, one digest byte per cell, with 5 paylines (3 rows, 2 diagonals). Three of
+    /// a kind pay the symbol's multiple of the line bet (stake / 5), wilds count as any symbol and a
+    /// board showing a single symbol pays 10x. The reserve is the 1000x of nine wilds.
+    pub fn place_slots(
+        ctx: Context<PlaceBet>,
+        amount: u64,
+        client_seed: String,
+        expected_commitment: [u8; 32],
+    ) -> Result<()> {
+        let max_payout = fair::slot_max_payout(amount).ok_or(HashrollError::MathOverflow)?;
+        escrow_bet(ctx.accounts, amount, max_payout, client_seed, expected_commitment)?;
+        let ps = &mut ctx.accounts.player_state;
+        ps.bet_game = Game::Slots;
+        emit_placed(ps);
+        Ok(())
+    }
+
     /// Withdraws payouts that were credited because the player's token account was missing at settlement.
     pub fn withdraw_owed(ctx: Context<WithdrawOwed>) -> Result<()> {
         let owed = ctx.accounts.player_state.owed;
@@ -423,7 +441,7 @@ fn emit_placed(ps: &PlayerState) {
 }
 
 /// Game outcome and payout of the pending bet. `outcome` is the Dice roll, the Plinko path bits
-/// (bit i = row i, 1 = right) or the Roulette number.
+/// (bit i = row i, 1 = right), the Roulette number or the Slots grid (cell i in bits 3i..3i+2).
 fn resolve(ps: &PlayerState, digest: &[u8; 32]) -> Result<(u32, u64)> {
     Ok(match ps.bet_game {
         Game::Dice => {
@@ -440,6 +458,10 @@ fn resolve(ps: &PlayerState, digest: &[u8; 32]) -> Result<(u32, u64)> {
         Game::Roulette => {
             let number = fair::digest_to_roulette_number(digest);
             (number as u32, fair::roulette_payout(ps.bet_chips.iter().map(|c| (c.mask, c.amount)), number))
+        }
+        Game::Slots => {
+            let grid = fair::digest_to_slot_grid(digest);
+            (fair::encode_slot_grid(&grid), fair::slot_payout(ps.bet_amount, &grid).ok_or(HashrollError::MathOverflow)?)
         }
     })
 }
@@ -553,6 +575,8 @@ pub enum Game {
     Dice,
     Plinko,
     Roulette,
+    /// Appended last: the variant index is part of the account and event encoding.
+    Slots,
 }
 
 /// Index into the Plinko tables of `fair.rs` (low = 0, medium = 1, high = 2).
@@ -804,9 +828,10 @@ pub struct BetSettled {
     pub rows: u8,
     pub risk: PlinkoRisk,
     pub chips: Vec<RouletteChip>,
-    /// Dice roll (0..9999), Plinko path bits (bit i = row i, 1 = right) or Roulette number (0..36).
+    /// Dice roll (0..9999), Plinko path bits (bit i = row i, 1 = right), Roulette number (0..36)
+    /// or Slots grid (cell i in bits 3i..3i+2).
     pub outcome: u32,
-    /// Gross payout (0 on a loss; Plinko can pay less than the stake).
+    /// Gross payout (0 on a loss; Plinko and Slots can pay less than the stake).
     pub payout: u64,
     /// True when the payout went to `owed` because the player's token account was missing.
     pub credited: bool,

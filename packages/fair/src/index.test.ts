@@ -129,3 +129,96 @@ test("plinko path matches the bits of node:crypto HMAC", () => {
     assert.deepEqual(resolvePlinko({ amount: 1n, rows: 16, risk: "low" }, { serverSeed: SERVER, clientSeed: CLIENT, nonce }).path, bits);
   }
 });
+
+/* ------------------------------------------------------------------ Slots */
+
+import {
+  SLOT_CELLS,
+  SLOT_LINE_PAYS,
+  SLOT_MAX_MULTIPLIER,
+  SLOT_SYMBOLS,
+  SLOT_WEIGHTS,
+  decodeSlotGrid,
+  digestToSlotGrid,
+  encodeSlotGrid,
+  resolveSlots,
+  slotMaxPayout,
+  slotPayout,
+  slotSymbol,
+  slotWins,
+} from "./index.js";
+
+test("slots: every byte maps to a symbol with the published weights", () => {
+  assert.equal(SLOT_WEIGHTS.reduce((a, b) => a + b, 0), 256);
+  assert.equal(SLOT_WEIGHTS.length, SLOT_SYMBOLS.length);
+  assert.equal(SLOT_LINE_PAYS.length, SLOT_SYMBOLS.length);
+  const seen = SLOT_SYMBOLS.map(() => 0);
+  for (let b = 0; b < 256; b++) seen[slotSymbol(b)]++;
+  assert.deepEqual(seen, [...SLOT_WEIGHTS]);
+  assert.deepEqual(digestToSlotGrid("00" + "14" + "15" + "ff".repeat(29)), [0, 0, 1, 6, 6, 6, 6, 6, 6]);
+  const grid = [0, 1, 2, 3, 4, 5, 6, 0, 3];
+  assert.deepEqual(decodeSlotGrid(encodeSlotGrid(grid)), grid);
+});
+
+test("slots: lines, wilds and the full-board multiplier", () => {
+  const W = 0, SEVEN = 1, GEM = 2, CHERRY = 5, LEMON = 6;
+  // No line: nothing pays.
+  assert.equal(slotWins([SEVEN, GEM, CHERRY, GEM, CHERRY, SEVEN, SEVEN, CHERRY, GEM]).units, 0);
+  // Top row of sevens only.
+  const top = slotWins([SEVEN, SEVEN, SEVEN, GEM, CHERRY, LEMON, LEMON, GEM, CHERRY]);
+  assert.deepEqual(top.lines, [{ line: 0, symbol: SEVEN, pay: 50 }]);
+  assert.equal(top.fullBoard, false);
+  assert.equal(slotPayout(1000n, [SEVEN, SEVEN, SEVEN, GEM, CHERRY, LEMON, LEMON, GEM, CHERRY]), 10_000n);
+  // A wild in the centre completes the middle row and both diagonals.
+  const mid = slotWins([GEM, LEMON, CHERRY, SEVEN, W, SEVEN, CHERRY, SEVEN, GEM]);
+  assert.deepEqual(mid.lines.map((l) => [l.line, l.symbol]), [[1, SEVEN], [3, GEM], [4, CHERRY]]);
+  assert.equal(mid.units, 50 + 25 + 5);
+  // Full board of lemons with two wilds: 5 lines x 3, times 10.
+  const full = slotWins([LEMON, W, LEMON, LEMON, LEMON, LEMON, W, LEMON, LEMON]);
+  assert.ok(full.fullBoard);
+  assert.equal(full.units, 150);
+  // Nine wilds: the 1000x maximum.
+  assert.equal(slotPayout(7n, Array(9).fill(W)), slotMaxPayout(7n));
+  // The payout is floored once, on the total.
+  assert.equal(slotPayout(3n, [LEMON, LEMON, LEMON, GEM, CHERRY, SEVEN, CHERRY, SEVEN, GEM]), 1n);
+});
+
+test("slots: exact RTP over all 7^9 boards, and no board beats the reserved maximum", () => {
+  // Σ weight(board) * units(board), exactly; RTP = total / (5 * 256^9).
+  let total = 0n;
+  let hits = 0n;
+  let maxUnits = 0;
+  const grid = Array(SLOT_CELLS).fill(0);
+  const walk = (i: number, weight: bigint) => {
+    if (i === SLOT_CELLS) {
+      const { units } = slotWins(grid);
+      if (units > maxUnits) maxUnits = units;
+      if (units > 0) hits += weight;
+      total += weight * BigInt(units);
+      return;
+    }
+    for (let s = 0; s < SLOT_WEIGHTS.length; s++) {
+      grid[i] = s;
+      walk(i + 1, weight * BigInt(SLOT_WEIGHTS[s]));
+    }
+  };
+  walk(0, 1n);
+  const den = 5n * 256n ** 9n;
+  assert.equal(BigInt(maxUnits), SLOT_MAX_MULTIPLIER * 5n);
+  assert.equal(total, SLOTS_RTP_NUMERATOR);
+  assert.ok(total * 1000n >= den * 965n && total * 1000n < den * 970n, "RTP must be in [96.5%, 97%)");
+  // About one spin in three pays something.
+  assert.ok(hits * 100n > 256n ** 9n * 30n && hits * 100n < 256n ** 9n * 35n);
+});
+
+test("fixed vectors for slots (specification regression)", () => {
+  const spins = [0, 1, 2, 3, 4].map((nonce) => resolveSlots({ amount: 5n }, { serverSeed: SERVER, clientSeed: CLIENT, nonce }));
+  assert.deepEqual(spins.map((s) => encodeSlotGrid(s.grid)), SLOTS_VECTORS);
+  assert.deepEqual(spins.map((s) => Number(s.payout)), SLOTS_UNITS);
+});
+
+// Fixed vectors (same seeds as above). Replayed by solana/programs/hashroll/src/fair.rs.
+const SLOTS_VECTORS = [68297653, 103568757, 113684572, 92345059, 57431838]; // encoded grids
+const SLOTS_UNITS = [10, 0, 0, 0, 15]; // total line bets won (the payout of a 5-unit stake)
+/** Σ weight * units over every board; the Rust tests derive the same number from the closed form. */
+const SLOTS_RTP_NUMERATOR = 22832364483877821225600n; // 96.6988%

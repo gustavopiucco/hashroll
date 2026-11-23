@@ -10,7 +10,7 @@ const rubik = Rubik({ variable: "--font-rubik", subsets: ["latin"], weight: ["60
 
 export const metadata: Metadata = {
   title: "Hashroll",
-  description: "Provably fair on-chain Dice, Plinko and Roulette on Solana",
+  description: "Provably fair on-chain Dice, Plinko, Roulette and Slots on Solana",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

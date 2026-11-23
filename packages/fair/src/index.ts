@@ -16,6 +16,7 @@
  *   Roulette  number = floor(n * 37 / 2^32)                       0..36 (European wheel)
  *   Plinko    row i goes right iff bit i of the digest is 1       bits read MSB-first: byte i/8, bit 7 - i%8
  *             slot = number of right bounces (0..rows)
+ *   Slots     cell i of the 3x3 grid (row-major) reads byte i     symbol = first one whose cumulative weight exceeds the byte
  */
 import { hmac } from "@noble/hashes/hmac.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -245,3 +246,101 @@ export function resolveRoulette(chips: RouletteChip[], seeds: { serverSeed: stri
 }
 
 export const rouletteColor = (n: number): "green" | "red" | "black" => (n === 0 ? "green" : RED_NUMBERS.includes(n) ? "red" : "black");
+
+/* ------------------------------- Slots ------------------------------- */
+
+/**
+ * 3x3 slot machine with 5 paylines (3 rows, 2 diagonals). Every cell is drawn independently from
+ * one digest byte, so there are no reel strips to trust: the weights below are the whole model.
+ *
+ *   symbol   = first index whose cumulative weight exceeds the byte (weights sum to 256: no bias)
+ *   line     = pays `SLOT_LINE_PAYS[s]` line bets when its 3 cells show `s`, wilds counting as any
+ *              symbol (three wilds pay as wild). The line bet is stake / 5.
+ *   full     = when all 9 cells show one symbol (wilds count), the whole win is multiplied by 10
+ *   payout   = floor(amount * units / 5), units = sum of the line pays (x10 on a full board)
+ *
+ * The largest win is a board of wilds: 5 lines * 100 * 10 / 5 = 1000x the stake. The edge is built
+ * into the weights (RTP 96.70%, checked exactly in the tests); `houseEdgeBps` does not apply.
+ * The on-chain program has an identical copy (solana/programs/hashroll/src/fair.rs).
+ */
+export const SLOT_SYMBOLS = ["wild", "seven", "gem", "bell", "clover", "cherry", "lemon"] as const;
+export type SlotSymbol = (typeof SLOT_SYMBOLS)[number];
+export const SLOT_WILD = 0;
+export const SLOT_CELLS = 9;
+/** Chance of each symbol per cell, out of 256. */
+export const SLOT_WEIGHTS: readonly number[] = [21, 25, 29, 37, 41, 48, 55];
+/** Pay of three of a kind, in line bets. */
+export const SLOT_LINE_PAYS: readonly number[] = [100, 50, 25, 15, 10, 5, 3];
+/** Cell indexes (row-major: 0 1 2 / 3 4 5 / 6 7 8) of each payline. */
+export const SLOT_LINES: readonly (readonly [number, number, number])[] = [
+  [0, 1, 2],
+  [3, 4, 5],
+  [6, 7, 8],
+  [0, 4, 8],
+  [6, 4, 2],
+];
+export const SLOT_FULL_BOARD_MULTIPLIER = 10;
+/** Largest payout as a multiple of the stake: what the program reserves for the bet. */
+export const SLOT_MAX_MULTIPLIER = 1000n;
+
+export function slotSymbol(byte: number): number {
+  let acc = 0;
+  for (let s = 0; s < SLOT_WEIGHTS.length; s++) {
+    acc += SLOT_WEIGHTS[s];
+    if (byte < acc) return s;
+  }
+  throw new Error(`invalid byte ${byte}`);
+}
+
+/** The 9 symbols of the grid, row-major, one digest byte each. */
+export function digestToSlotGrid(digestHex: string): number[] {
+  return Array.from({ length: SLOT_CELLS }, (_, i) => slotSymbol(parseInt(digestHex.slice(i * 2, i * 2 + 2), 16)));
+}
+
+/** On-chain encoding of a grid (event `outcome`): cell i in bits 3i..3i+2. */
+export const encodeSlotGrid = (grid: number[]) => grid.reduce((acc, s, i) => acc | (s << (3 * i)), 0);
+export const decodeSlotGrid = (bits: number) => Array.from({ length: SLOT_CELLS }, (_, i) => (bits >> (3 * i)) & 7);
+
+/** Symbol that three cells agree on (wild if all are wild), or -1 when they do not match. */
+export function slotLineSymbol(a: number, b: number, c: number): number {
+  let symbol = SLOT_WILD;
+  for (const x of [a, b, c]) {
+    if (x === SLOT_WILD) continue;
+    if (symbol === SLOT_WILD) symbol = x;
+    else if (symbol !== x) return -1;
+  }
+  return symbol;
+}
+
+export interface SlotWin {
+  /** Index into SLOT_LINES. */
+  line: number;
+  symbol: number;
+  /** Pay in line bets, before the full-board multiplier. */
+  pay: number;
+}
+
+/** Winning lines of a grid and the total in line bets (`units`, already x10 on a full board). */
+export function slotWins(grid: number[]): { lines: SlotWin[]; fullBoard: boolean; units: number } {
+  const lines: SlotWin[] = [];
+  SLOT_LINES.forEach(([a, b, c], line) => {
+    const symbol = slotLineSymbol(grid[a], grid[b], grid[c]);
+    if (symbol >= 0) lines.push({ line, symbol, pay: SLOT_LINE_PAYS[symbol] });
+  });
+  const others = grid.filter((s) => s !== SLOT_WILD);
+  const fullBoard = others.every((s) => s === others[0]);
+  const sum = lines.reduce((t, w) => t + w.pay, 0);
+  return { lines, fullBoard, units: fullBoard ? sum * SLOT_FULL_BOARD_MULTIPLIER : sum };
+}
+
+export function slotPayout(amount: bigint, grid: number[]): bigint {
+  return (amount * BigInt(slotWins(grid).units)) / BigInt(SLOT_LINES.length);
+}
+
+export const slotMaxPayout = (amount: bigint) => amount * SLOT_MAX_MULTIPLIER;
+
+export function resolveSlots(bet: { amount: bigint }, seeds: { serverSeed: string; clientSeed: string; nonce: number }) {
+  const digest = computeDigest(seeds.serverSeed, seeds.clientSeed, seeds.nonce);
+  const grid = digestToSlotGrid(digest);
+  return { grid, ...slotWins(grid), payout: slotPayout(bet.amount, grid), digest };
+}

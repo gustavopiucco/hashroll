@@ -6,6 +6,7 @@
 //!   roll       = floor(n * 10000 / 2^32)            -> 0..9999   (Dice)
 //!   number     = floor(n * 37 / 2^32)               -> 0..36     (Roulette)
 //!   path       = bit i of the digest, MSB-first     -> 1 = right (Plinko, one bit per row)
+//!   grid       = byte i of the digest -> symbol     -> 3x3, row-major (Slots, weights out of 256)
 //!
 //! Seeds are UTF-8 strings (the house uses 64 hex characters); the HMAC key is their UTF-8 bytes.
 //! The fixed vectors in `packages/fair/src/index.test.ts` are replayed in the tests below.
@@ -158,6 +159,83 @@ pub fn roulette_payout<I: IntoIterator<Item = (u64, u64)>>(chips: I, number: u8)
     chips.into_iter().fold(0u64, |sum, (m, a)| sum.saturating_add(chip_payout(m, a, number)))
 }
 
+/* ------------------------------------------------------------- Slots */
+
+pub const SLOT_CELLS: usize = 9;
+pub const SLOT_SYMBOL_COUNT: usize = 7; // wild, seven, gem, bell, clover, cherry, lemon
+pub const SLOT_WILD: u8 = 0;
+/// Chance of each symbol per cell, out of 256. Identical to SLOT_WEIGHTS in `packages/fair`.
+/// The house edge is built in (RTP 96.70%); `house_edge_bps` does not apply.
+pub const SLOT_WEIGHTS: [u16; SLOT_SYMBOL_COUNT] = [21, 25, 29, 37, 41, 48, 55];
+/// Pay of three of a kind, in line bets (line bet = stake / 5).
+pub const SLOT_LINE_PAYS: [u64; SLOT_SYMBOL_COUNT] = [100, 50, 25, 15, 10, 5, 3];
+/// Cell indexes (row-major) of the 5 paylines: 3 rows and 2 diagonals.
+pub const SLOT_LINES: [[usize; 3]; 5] = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 4, 8], [6, 4, 2]];
+pub const SLOT_FULL_BOARD_MULTIPLIER: u64 = 10;
+/// Largest payout as a multiple of the stake: nine wilds = 5 lines * 100 * 10 / 5.
+pub const SLOT_MAX_MULTIPLIER: u64 = 1_000;
+
+/// First symbol whose cumulative weight exceeds the byte.
+pub fn slot_symbol(byte: u8) -> u8 {
+    let mut acc = 0u16;
+    for (s, w) in SLOT_WEIGHTS.iter().enumerate() {
+        acc += w;
+        if (byte as u16) < acc {
+            return s as u8;
+        }
+    }
+    unreachable!("the weights sum to 256")
+}
+
+/// The 9 symbols of the grid, row-major, one digest byte each.
+pub fn digest_to_slot_grid(digest: &[u8; 32]) -> [u8; SLOT_CELLS] {
+    core::array::from_fn(|i| slot_symbol(digest[i]))
+}
+
+/// Event encoding: cell i in bits 3i..3i+2.
+pub fn encode_slot_grid(grid: &[u8; SLOT_CELLS]) -> u32 {
+    grid.iter().enumerate().fold(0u32, |acc, (i, s)| acc | (*s as u32) << (3 * i))
+}
+
+/// Pay of a line in line bets: its 3 cells must show one symbol, wilds counting as any.
+pub fn slot_line_pay(a: u8, b: u8, c: u8) -> u64 {
+    let mut symbol = SLOT_WILD;
+    for x in [a, b, c] {
+        if x == SLOT_WILD {
+            continue;
+        }
+        if symbol == SLOT_WILD {
+            symbol = x;
+        } else if symbol != x {
+            return 0;
+        }
+    }
+    SLOT_LINE_PAYS[symbol as usize]
+}
+
+/// Total win in line bets: the sum of the line pays, times 10 when all 9 cells show one symbol.
+pub fn slot_units(grid: &[u8; SLOT_CELLS]) -> u64 {
+    let sum: u64 = SLOT_LINES.iter().map(|l| slot_line_pay(grid[l[0]], grid[l[1]], grid[l[2]])).sum();
+    let mut others = grid.iter().filter(|s| **s != SLOT_WILD);
+    let first = others.next();
+    let full_board = others.all(|s| Some(s) == first);
+    if full_board {
+        sum * SLOT_FULL_BOARD_MULTIPLIER
+    } else {
+        sum
+    }
+}
+
+/// floor(amount * units / 5): floored once, on the total.
+pub fn slot_payout(amount: u64, grid: &[u8; SLOT_CELLS]) -> Option<u64> {
+    let p = (amount as u128) * (slot_units(grid) as u128) / SLOT_LINES.len() as u128;
+    u64::try_from(p).ok()
+}
+
+pub fn slot_max_payout(amount: u64) -> Option<u64> {
+    amount.checked_mul(SLOT_MAX_MULTIPLIER)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +321,69 @@ mod tests {
         assert!(!is_valid_client_seed(""));
         assert!(!is_valid_client_seed("a:b"));
         assert!(!is_valid_client_seed(&"x".repeat(33)));
+    }
+
+    #[test]
+    fn slots_vectors_match_the_typescript_spec() {
+        let grids: Vec<[u8; 9]> = (0..5).map(|n| digest_to_slot_grid(&compute_digest(SERVER.as_bytes(), CLIENT, n))).collect();
+        let encoded: Vec<u32> = grids.iter().map(encode_slot_grid).collect();
+        let payouts: Vec<u64> = grids.iter().map(|g| slot_payout(5, g).unwrap()).collect();
+        assert_eq!(encoded, [68297653, 103568757, 113684572, 92345059, 57431838]);
+        assert_eq!(payouts, [10, 0, 0, 0, 15]);
+    }
+
+    #[test]
+    fn slots_rules() {
+        let seen = (0..=255u8).fold([0u16; SLOT_SYMBOL_COUNT], |mut acc, b| {
+            acc[slot_symbol(b) as usize] += 1;
+            acc
+        });
+        assert_eq!(seen, SLOT_WEIGHTS);
+        // Top row of sevens.
+        assert_eq!(slot_units(&[1, 1, 1, 2, 5, 6, 6, 2, 5]), 50);
+        // A wild in the centre completes the middle row and both diagonals.
+        assert_eq!(slot_units(&[2, 6, 5, 1, 0, 1, 5, 1, 2]), 50 + 25 + 5);
+        // Full board of lemons with two wilds: 5 lines x 3, times 10.
+        assert_eq!(slot_units(&[6, 0, 6, 6, 6, 6, 0, 6, 6]), 150);
+        assert_eq!(slot_units(&[1, 2, 5, 2, 5, 1, 1, 5, 2]), 0);
+        // Nine wilds pay the reserved maximum; the payout is floored once.
+        assert_eq!(slot_payout(7, &[0; 9]), slot_max_payout(7));
+        assert_eq!(slot_payout(3, &[6, 6, 6, 2, 5, 1, 5, 1, 2]), Some(1));
+        assert_eq!(slot_max_payout(u64::MAX), None);
+    }
+
+    /// Σ weight * units over every board, from the closed form: each line pays independently of
+    /// the others, and only the boards made of one symbol plus wilds get the x10.
+    #[test]
+    fn slots_rtp_matches_the_typescript_enumeration() {
+        let w = |s: usize| SLOT_WEIGHTS[s] as u128;
+        let n = SLOT_SYMBOL_COUNT;
+        let mut line = 0u128; // Σ weight * pay over the 256^3 outcomes of one line
+        for a in 0..n {
+            for b in 0..n {
+                for c in 0..n {
+                    line += w(a) * w(b) * w(c) * slot_line_pay(a as u8, b as u8, c as u8) as u128;
+                }
+            }
+        }
+        let mut total = SLOT_LINES.len() as u128 * line * 256u128.pow(6);
+        let mut max_units = 0u64;
+        for s in 1..n {
+            for wilds in 0u32..512 {
+                if wilds == 511 && s > 1 {
+                    continue; // the board of nine wilds is counted once
+                }
+                let grid: [u8; 9] = core::array::from_fn(|i| if wilds >> i & 1 == 1 { SLOT_WILD } else { s as u8 });
+                let weight: u128 = grid.iter().map(|c| w(*c as usize)).product();
+                let units = slot_units(&grid);
+                max_units = max_units.max(units);
+                // `total` already holds these boards once, without the multiplier.
+                total += weight * (units - units / SLOT_FULL_BOARD_MULTIPLIER) as u128;
+            }
+        }
+        assert_eq!(max_units, SLOT_MAX_MULTIPLIER * SLOT_LINES.len() as u64);
+        assert_eq!(total, 22832364483877821225600); // same number as packages/fair: RTP 96.6988%
+        let den = SLOT_LINES.len() as u128 * 256u128.pow(9);
+        assert!(total * 1000 >= den * 965 && total * 1000 < den * 970);
     }
 }

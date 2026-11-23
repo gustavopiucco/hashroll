@@ -72,5 +72,21 @@ export function GameIcon({ game, className = "h-8 w-8" }: { game: Game; classNam
           <circle cx="44" cy="15" r="3.2" fill="#fff" />
         </svg>
       );
+    case "slots":
+      return (
+        <svg viewBox="0 0 64 64" className={className} aria-hidden>
+          <rect x="4" y="10" width="52" height="46" rx="11" fill="#6a4dff" />
+          <rect x="4" y="10" width="52" height="12" rx="6" fill="#9b8cff" />
+          <rect x="9" y="24" width="42" height="24" rx="5" fill="#120a33" />
+          {[11, 24.5, 38].map((x) => (
+            <rect key={x} x={x} y="26" width="11.5" height="20" rx="3" fill="#f3f0ff" />
+          ))}
+          <path d="M13 30h7.5l-3.6 12h-3l3-9H13z" fill="#ff3d7f" />
+          <path d="M27.6 30l-1 12M33.6 30l-1 12M25.8 34h9M25.2 38.5h9" stroke="#12b981" strokeWidth="2" strokeLinecap="round" />
+          <path d="M40 30h7.5l-3.6 12h-3l3-9H40z" fill="#ff3d7f" />
+          <path d="M56 36h3V22" stroke="#c9c4ff" strokeWidth="3" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+          <circle cx="59" cy="18" r="4" fill="#ffc83d" />
+        </svg>
+      );
   }
 }

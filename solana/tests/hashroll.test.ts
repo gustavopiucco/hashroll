@@ -31,9 +31,12 @@ import {
   plinkoMaxPayout,
   resolvePlinko,
   resolveRoulette,
+  resolveSlots,
   rouletteMasks,
   rouletteMaxPayout,
   encodePlinkoPath,
+  encodeSlotGrid,
+  slotMaxPayout,
 } from "@hashroll/fair";
 import {
   BN,
@@ -436,14 +439,55 @@ describe("roulette", () => {
   });
 });
 
+describe("slots", () => {
+  it("spins exactly like packages/fair and pays the line wins", async () => {
+    const env = await ready();
+    const p = env.player.publicKey;
+    const server = "hashroll-test-server-seed";
+    await env.openPlayer(server);
+    const amount = 2n * HROLL_UNIT;
+    let wins = 0;
+    // The first rounds replay the fixed vectors: the house reuses the same seed for every nonce here.
+    for (let nonce = 0; nonce < 10; nonce++) {
+      const before = env.balance(env.ata(p));
+      await env.place({ game: "slots", amount }, "player-seed");
+      expect(env.playerState()!.bet).toMatchObject({ game: "slots", amount, maxPayout: slotMaxPayout(amount) });
+      expect(env.reserved()).toBe(slotMaxPayout(amount));
+      const meta = await env.settle(server, server);
+      const [entry] = eventsToHistory("sig", null, meta.logs(), p);
+      const ref = resolveSlots({ amount }, { serverSeed: server, clientSeed: "player-seed", nonce });
+      expect(entry.outcome).toBe(encodeSlotGrid(ref.grid));
+      expect(entry.payout).toBe(ref.payout);
+      expect(entry.win).toBe(ref.payout > amount);
+      expect(entry.bet).toMatchObject({ game: "slots", amount });
+      expect(env.balance(env.ata(p))).toBe(before - amount + ref.payout);
+      expect(env.reserved()).toBe(0n);
+      if (nonce === 0) expect(ref.payout).toBe(4n * HROLL_UNIT); // vector: 10 line bets
+      if (ref.payout > 0n) wins++;
+    }
+    expect(wins).toBe(3); // nonces 0, 4 and 9
+  });
+
+  it("caps the 1000x maximum by the bankroll limit and rejects bad amounts", async () => {
+    const env = await ready();
+    await env.openPlayer(seedFor("a"));
+    await expectFail(env.place({ game: "slots", amount: 0n }, "c"), "ZeroAmount");
+    await expectFail(env.place({ game: "slots", amount: 2n ** 63n }, "c"), "MathOverflow");
+    // Max profit is 10,000 HROLL and a spin can pay 1000x, so 11 HROLL is too much.
+    await expectFail(env.place({ game: "slots", amount: 11n * HROLL_UNIT }, "c"), "ProfitTooHigh");
+    await env.place({ game: "slots", amount: 10n * HROLL_UNIT }, "c");
+  });
+});
+
 describe("blocking the reveal", () => {
   // A player who closes their token account must not be able to stop any outcome from settling
   // (and then claim the full payout at the timeout). Every game settles without it.
   const cases: [string, BetInput, string][] = [
-    // Fixed vector nonce 0: roll 73.38, roulette 27, plinko path of the same digest.
+    // Fixed vector nonce 0: roll 73.38, roulette 27, plinko path and slots grid of the same digest.
     ["dice loss", { game: "dice", amount: HROLL_UNIT, target: 5000, direction: "under" }, "player-seed"],
     ["dice win", { game: "dice", amount: HROLL_UNIT, target: 5000, direction: "over" }, "player-seed"],
     ["plinko", { game: "plinko", amount: HROLL_UNIT, rows: 16, risk: "low" }, "player-seed"],
+    ["slots win", { game: "slots", amount: HROLL_UNIT }, "player-seed"],
     ["roulette win", { game: "roulette", chips: [{ mask: rouletteMasks.red(), amount: HROLL_UNIT }] }, "player-seed"],
   ];
   for (const [name, bet, clientSeed] of cases) {

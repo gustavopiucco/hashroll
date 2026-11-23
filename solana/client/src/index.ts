@@ -37,9 +37,9 @@ export const HROLL_UNIT = 10n ** BigInt(HROLL_DECIMALS);
 export const PENDING_OFFSET = 80;
 
 export type Direction = "under" | "over";
-export type Game = "dice" | "plinko" | "roulette";
+export type Game = "dice" | "plinko" | "roulette" | "slots";
 export type PlinkoRisk = "low" | "medium" | "high";
-export const GAMES: readonly Game[] = ["dice", "plinko", "roulette"];
+export const GAMES: readonly Game[] = ["dice", "plinko", "roulette", "slots"];
 
 /* --------------------------------------------------------------- addresses */
 
@@ -94,14 +94,15 @@ export const fromAnchorRisk = (r: object): PlinkoRisk => {
 };
 export const fromAnchorGame = (g: object): Game => {
   const v = variant(g);
-  return v === "plinko" || v === "roulette" ? v : "dice";
+  return GAMES.find((game) => game === v) ?? "dice";
 };
 
 /** What the player bets on. Amounts are HROLL base units. */
 export type BetInput =
   | { game: "dice"; amount: bigint; target: number; direction: Direction }
   | { game: "plinko"; amount: bigint; rows: number; risk: PlinkoRisk }
-  | { game: "roulette"; chips: { mask: bigint; amount: bigint }[] };
+  | { game: "roulette"; chips: { mask: bigint; amount: bigint }[] }
+  | { game: "slots"; amount: bigint };
 
 /** Accounts of every `place_*` instruction (also `claim_expired` and `withdraw_owed`). */
 export function playerAccounts(player: PublicKey, mint: PublicKey, programId = PROGRAM_ID) {
@@ -134,7 +135,9 @@ export async function placeBetInstruction(
       ? m.placeDice(bn(bet.amount), bet.target, toAnchorDirection(bet.direction), clientSeed, expected)
       : bet.game === "plinko"
         ? m.placePlinko(bn(bet.amount), bet.rows, toAnchorRisk(bet.risk), clientSeed, expected)
-        : m.placeRoulette(bet.chips.map((c) => ({ mask: bn(c.mask), amount: bn(c.amount) })), clientSeed, expected);
+        : bet.game === "roulette"
+          ? m.placeRoulette(bet.chips.map((c) => ({ mask: bn(c.mask), amount: bn(c.amount) })), clientSeed, expected)
+          : m.placeSlots(bn(bet.amount), clientSeed, expected);
   return builder.accountsPartial(accounts).instruction();
 }
 
@@ -245,7 +248,7 @@ export interface BetHistoryEntry {
   serverSeed: string | null; // null when the bet expired (seed never revealed)
   clientSeed: string | null;
   bet: BetDetails | null; // null when expired (the event only carries the payout)
-  /** Dice roll (0..9999), Plinko path bits (bit i = row i, 1 = right) or Roulette number (0..36). */
+  /** Dice roll (0..9999), Plinko path bits (bit i = row i, 1 = right), Roulette number (0..36) or Slots grid (cell i in bits 3i..3i+2). */
   outcome: number | null;
   payout: bigint;
   /** The payout went to `owed` because the player's token account was missing. */

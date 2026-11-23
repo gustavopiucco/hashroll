@@ -10,6 +10,7 @@ const NAV: { href: string; label: string; game?: Game }[] = [
   { href: "/dice", label: "Dice", game: "dice" },
   { href: "/plinko", label: "Plinko", game: "plinko" },
   { href: "/roulette", label: "Roulette", game: "roulette" },
+  { href: "/slots", label: "Slots", game: "slots" },
   { href: "/verify", label: "Verify" },
 ];
 

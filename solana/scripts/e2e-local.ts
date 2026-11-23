@@ -1,6 +1,6 @@
 /**
  * End-to-end smoke test against the local stack (validator + deployed program + running API).
- * Acts as a fresh player: faucet → open account → one bet per game (Dice, Plinko, Roulette) → wait
+ * Acts as a fresh player: faucet → open account → one bet per game (Dice, Plinko, Roulette, Slots) → wait
  * for the house to settle → re-verify every outcome with packages/fair.
  *
  *   npm run e2e:local -w @hashroll/program              # one round per game (API settler running)
@@ -11,8 +11,10 @@ import { Connection, Keypair, Transaction, type TransactionInstruction } from "@
 import {
   computeRoll,
   encodePlinkoPath,
+  encodeSlotGrid,
   payoutFor,
   resolvePlinko,
+  resolveSlots,
   resolveRoulette,
   rouletteMasks,
   verifyCommitment,
@@ -107,6 +109,14 @@ async function main() {
         const chips = [{ mask: rouletteMasks.red(), amount: 3n * u }, { mask: rouletteMasks.straight(17), amount: 1n * u }];
         const r = resolveRoulette(chips, { serverSeed: s, clientSeed: c, nonce: n });
         return { outcome: r.number, payout: r.payout };
+      },
+    },
+    {
+      bet: { game: "slots", amount: 5n * u },
+      stake: 5n * u,
+      reference: (s, c, n) => {
+        const r = resolveSlots({ amount: 5n * u }, { serverSeed: s, clientSeed: c, nonce: n });
+        return { outcome: encodeSlotGrid(r.grid), payout: r.payout };
       },
     },
   ];

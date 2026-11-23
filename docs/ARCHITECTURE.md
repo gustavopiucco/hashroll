@@ -7,7 +7,7 @@ For setup instructions, the full Provably Fair specification and known limitatio
 
 ## 1. The big picture
 
-Hashroll is a provably fair casino (Dice, Plinko, Roulette) where **the Solana program holds the money and decides every outcome**. The backend never touches player funds and cannot fake a result; it only holds the house key that commits to and reveals the server seeds.
+Hashroll is a provably fair casino (Dice, Plinko, Roulette, Slots) where **the Solana program holds the money and decides every outcome**. The backend never touches player funds and cannot fake a result; it only holds the house key that commits to and reveals the server seeds.
 
 | Responsibility | Where it lives |
 |---|---|
@@ -82,7 +82,7 @@ The toolchain (Rust, Solana CLI, Anchor 0.32) runs inside the `solanafoundation/
 | `admin`, `pending_admin` | Admin key and two-step admin transfer |
 | `house` | Key allowed to open players, commit and reveal seeds |
 | `mint`, `vault` | HROLL token mint and the bankroll token account (owned by a program PDA) |
-| `house_edge_bps` | Dice edge (Plinko and Roulette have the edge built into their payouts) |
+| `house_edge_bps` | Dice edge (Plinko, Roulette and Slots have the edge built into their payouts) |
 | `max_payout_bps` | Max profit per bet = free bankroll × this / 10000 |
 | `settle_timeout_secs` | After this, the player can claim the max payout |
 | `paused` | Blocks new bets only; settlement and claims keep working |
@@ -111,7 +111,7 @@ Field order in `PlayerState` matters: the API finds pending bets with a `memcmp`
 | House | `open_player` | house | Create a `PlayerState` with the first commitment |
 | | `commit_seed` | house | Store the commitment for the next bet |
 | | `settle_bet` | house | Reveal the seed, compute the outcome, pay |
-| Player | `place_dice`, `place_plinko`, `place_roulette` | player | Escrow the stake and register the bet |
+| Player | `place_dice`, `place_plinko`, `place_roulette`, `place_slots` | player | Escrow the stake and register the bet |
 | | `claim_expired` | player | Collect the max payout after the timeout |
 | | `withdraw_owed` | player | Withdraw payouts credited to `owed` |
 
@@ -127,6 +127,7 @@ The single source of truth for the math, with values as `bigint`:
 - Dice: `digestToRoll`, `isWin`, `payoutFor`, `resolveDice`
 - Plinko: `PLINKO_TABLES`, `digestToPlinkoPath`, `plinkoPayout`, `plinkoMaxPayout`, `resolvePlinko`
 - Roulette: `digestToRouletteNumber`, `rouletteMasks`, `chipPayout`, `rouletteMaxPayout`, `resolveRoulette`
+- Slots: `SLOT_WEIGHTS`, `SLOT_LINE_PAYS`, `SLOT_LINES`, `digestToSlotGrid`, `slotWins`, `slotPayout`, `slotMaxPayout`, `resolveSlots`
 
 The web app uses it for previews (multiplier, profit) and for the `/verify` page. Fixed test vectors in `index.test.ts` are replayed against `fair.rs` and against the deployed program, so the TS and Rust implementations cannot drift apart.
 
@@ -169,8 +170,9 @@ Next.js 16 with Tailwind 4 and the Solana wallet adapter. The web app reads bala
 |---|---|
 | `src/lib/useHashroll.ts` | Central hook: loads config, vault, player, balances and history; exposes `play`, `claimExpired`, `withdrawOwed`, `faucet` |
 | `src/lib/solana.ts`, `src/lib/api.ts` | RPC connection / Anchor program, and the API client |
-| `src/app/{dice,plinko,roulette}/page.tsx` | One page per game, built on `components/GameShell.tsx` |
+| `src/app/{dice,plinko,roulette,slots}/page.tsx` | One page per game, built on `components/GameShell.tsx` |
 | `src/games/*Stage.ts` | PixiJS scenes, mounted by `usePixiStage.ts`; Dice is a 2.5D 0–100 lane with a draggable gate |
+| `src/games/slotSymbols.ts` | Slots symbol art as SVG markup, shared by the PixiJS reels and `components/SlotIcon.tsx` |
 | `src/app/verify/page.tsx` | Independent verifier: recomputes any bet with `@hashroll/fair` in the browser, no API call |
 | `src/games/fx.ts` | Particle and shockwave effects, plus easing helpers, for the PixiJS stages |
 | `src/lib/sound.ts`, `src/lib/effects.ts` | Sound and celebration effects |
@@ -182,6 +184,7 @@ The animation **only replays** the outcome read from the chain. Each stage has a
 | Dice | `roll()` | `reveal(roll, win)` |
 | Plinko | `wait()` | `drop(path, rows, risk)` |
 | Roulette | `spin()` | `land(number)` |
+| Slots | `spin()` | `land(grid)` |
 
 Transactions are signed by the wallet but submitted through the app's own RPC, so the wallet's selected network does not matter.
 
@@ -196,7 +199,7 @@ Transactions are signed by the wallet but submitted through the app's own RPC, s
       │── POST /players/:addr/open ────────────────────────────────────────▶ │
       │                                 │ ◀── open_player(SHA256(seed₀)) ──── │
       │                                 │                                    │
-      │ 2. place_dice / plinko / roulette (clientSeed, expectedCommitment)   │
+      │ 2. place_<game> (clientSeed, expectedCommitment)                     │
       │───────────────────────────────▶ │ stake → vault                      │
       │                                 │ reserve max payout                 │
       │                                 │ pending = true                     │
@@ -260,8 +263,9 @@ Transactions are signed by the wallet but submitted through the app's own RPC, s
 | Dice | `roll = floor(n × 10000 / 2³²)` (0–9999) | `amount × (10000 − houseEdgeBps) / target` if `roll < target` (under) or `roll ≥ 10000 − target` (over) |
 | Plinko | Bit `i` of the digest = 1 means right at row `i`; slot = number of right bounces | Fixed multiplier from `PLINKO_TABLES[rows][risk][slot]` |
 | Roulette | `number = floor(n × 37 / 2³²)` (0–36) | Each chip covering `k` numbers via a 37-bit mask pays `amount × 36 / k` |
+| Slots | Cell `i` of a 3×3 grid reads byte `i` of the digest; the symbol is the first whose cumulative weight exceeds it | `floor(amount × units / 5)`, `units` = sum of the 5 lines' pays, ×10 when the board shows one symbol |
 
-`BetSettled.outcome` holds the Dice roll, the Plinko path bits or the Roulette number.
+`BetSettled.outcome` holds the Dice roll, the Plinko path bits, the Roulette number or the Slots grid (3 bits per cell).
 
 ---
 

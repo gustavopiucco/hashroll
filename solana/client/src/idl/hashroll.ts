@@ -896,6 +896,115 @@ export type Hashroll = {
       ]
     },
     {
+      "name": "placeSlots",
+      "docs": [
+        "Slots: a 3x3 grid, one digest byte per cell, with 5 paylines (3 rows, 2 diagonals). Three of",
+        "a kind pay the symbol's multiple of the line bet (stake / 5), wilds count as any symbol and a",
+        "board showing a single symbol pays 10x. The reserve is the 1000x of nine wilds."
+      ],
+      "discriminator": [
+        47,
+        230,
+        251,
+        157,
+        213,
+        211,
+        82,
+        62
+      ],
+      "accounts": [
+        {
+          "name": "player",
+          "signer": true,
+          "relations": [
+            "playerState"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "playerState",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  121,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mint",
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "playerToken",
+          "writable": true
+        },
+        {
+          "name": "tokenProgram",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "clientSeed",
+          "type": "string"
+        },
+        {
+          "name": "expectedCommitment",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
       "name": "proposeAdmin",
       "docs": [
         "Two-step admin transfer (step 1). Pass the default pubkey to cancel."
@@ -1761,14 +1870,15 @@ export type Hashroll = {
           {
             "name": "outcome",
             "docs": [
-              "Dice roll (0..9999), Plinko path bits (bit i = row i, 1 = right) or Roulette number (0..36)."
+              "Dice roll (0..9999), Plinko path bits (bit i = row i, 1 = right), Roulette number (0..36)",
+              "or Slots grid (cell i in bits 3i..3i+2)."
             ],
             "type": "u32"
           },
           {
             "name": "payout",
             "docs": [
-              "Gross payout (0 on a loss; Plinko can pay less than the stake)."
+              "Gross payout (0 on a loss; Plinko and Slots can pay less than the stake)."
             ],
             "type": "u64"
           },
@@ -1903,6 +2013,9 @@ export type Hashroll = {
           },
           {
             "name": "roulette"
+          },
+          {
+            "name": "slots"
           }
         ]
       }

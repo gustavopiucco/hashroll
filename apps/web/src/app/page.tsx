@@ -39,6 +39,18 @@ const GAMES: { game: Game; name: string; tagline: string; stats: [string, string
     to: "#2a0612",
     glow: "#ff3d7f",
   },
+  {
+    game: "slots",
+    name: "Slots",
+    tagline: "3 reels, 5 lines, # is wild. Fill the board for ×10.",
+    stats: [
+      ["Max", "1000x"],
+      ["RTP", "96.7%"],
+    ],
+    from: "#3a1d8a",
+    to: "#140a38",
+    glow: "#9b8cff",
+  },
 ];
 
 const STEPS = [
@@ -81,7 +93,7 @@ export default function Lobby() {
 
       <section className="flex flex-col gap-4">
         <h2 className="font-display text-2xl font-black">Games</h2>
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {GAMES.map((g) => (
             <Link
               key={g.game}
@@ -98,17 +110,17 @@ export default function Lobby() {
               </div>
               <span className="relative font-display text-3xl font-black">{g.name}</span>
               <span className="relative mt-1 text-sm text-white/70">{g.tagline}</span>
-              <div className="relative mt-4 flex items-center justify-between">
-                <div className="flex gap-2">
+              <div className="relative mt-auto flex items-center justify-between gap-1.5 pt-4">
+                <div className="flex gap-1.5">
                   {g.stats.map(([k, v]) => (
-                    <span key={k} className="rounded-lg bg-black/30 px-2 py-1 text-xs">
+                    <span key={k} className="whitespace-nowrap rounded-lg bg-black/30 px-1.5 py-1 text-xs">
                       <span className="text-white/50">{k} </span>
                       <span className="font-bold">{v}</span>
                     </span>
                   ))}
                 </div>
                 <span
-                  className="rounded-full px-4 py-1.5 text-sm font-bold text-black transition group-hover:animate-[glow-pulse_1.6s_ease-in-out_infinite]"
+                  className="rounded-full px-3 py-1.5 text-sm font-bold text-black transition group-hover:animate-[glow-pulse_1.6s_ease-in-out_infinite]"
                   style={{ background: g.glow }}
                 >
                   Play

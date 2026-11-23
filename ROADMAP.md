@@ -18,8 +18,9 @@ Each phase has an **exit criterion**. Do not move to a public cluster before pas
 - [x] docker-compose (Postgres, `solana-test-validator`), Dockerized Anchor build, local deploy/bootstrap and an end-to-end smoke script (`e2e:local`)
 
 - [x] **More games:** Plinko (8/12/16 rows, 3 risk levels, fixed tables with exact RTP checks) and European Roulette (up to 8 chips per spin as 37-bit masks), on the same commit-reveal settlement
+- [x] Slots: 3x3 grid, 5 paylines, wilds and a x10 full board (1,000x max), with an exact RTP check over every board
 - [x] Settlement never depends on the player's token account: payouts are credited to `owed` and withdrawn with `withdraw_owed`
-- [x] Game UI: lobby, animated Dice, Plinko and Roulette (PixiJS stages) that only replay the on-chain result; friendly Anchor error messages; multi-game verifier
+- [x] Game UI: lobby, animated Dice, Plinko, Roulette and Slots (PixiJS stages) that only replay the on-chain result; friendly Anchor error messages; multi-game verifier
 
 The click-through flow with a real browser wallet has not been tested yet; it is the first item of phase 1.
 
@@ -33,7 +34,7 @@ The click-through flow with a real browser wallet has not been tested yet; it is
 - [ ] DTO validation (`zod`) and standardized error responses on the API
 - [x] Sound effects and a WebGL renderer (PixiJS)
 - [ ] Simple auto-bet (N bets, stop on profit or loss); consider session keys to avoid one wallet prompt per bet
-- [ ] Program tests for admin paths (`set_params`, `set_house`, pause, two-step admin) and fuzzing of amounts, targets, Plinko configs and Roulette masks
+- [ ] Program tests for admin paths (`set_params`, `set_house`, pause, two-step admin) and fuzzing of amounts (all games, Slots included), targets, Plinko configs and Roulette masks
 - [ ] Lint, format and CI (GitHub Actions running `npm test` and `npm run build:program`)
 
 **Exit:** stable local demo with green CI.
@@ -62,7 +63,7 @@ The click-through flow with a real browser wallet has not been tested yet; it is
 - [ ] Separate dev faucet from any non-local build (compile it out)
 - [ ] Bankroll LP design: let third parties provide liquidity to the vault (shares, withdrawal queue)
 - [ ] Reconciliation job: vault balance ≥ `reserved`, observed RTP vs. theoretical per game, house PnL
-- [ ] Per-game exposure limits: cap the total `reserved` of high-multiplier bets (Plinko 1,000x) so a settler outage cannot drain the bankroll through timeout claims
+- [ ] Per-game exposure limits: cap the total `reserved` of high-multiplier bets (Plinko and Slots 1,000x) so a settler outage cannot drain the bankroll through timeout claims
 
 **Exit:** no secret on disk, and reconciliation runs automatically.
 
@@ -115,7 +116,7 @@ These items come from section 5 of the original architecture and **are not optio
 
 - [ ] Deploy to **Solana mainnet-beta** with initial liquidity
 - [ ] **Crash:** shared rounds over WebSocket, with a pre-committed hash chain. It needs round accounts and timed cash-outs, a different design from the per-player commit-reveal of the other games (a single-player "auto cash-out" variant would be Dice with another skin)
-- [x] Plinko and Roulette (done early, see phase 0)
+- [x] Plinko, Roulette and Slots (done early, see phase 0)
 - [ ] Evaluate an on-chain VRF (e.g. Switchboard or ORAO) for games where a house reveal is not wanted
 - [ ] Advanced tokenomics: house staking (players as bankroll LPs), affiliate program
 - [ ] Mobile app / PWA (Solana Mobile Wallet Adapter)

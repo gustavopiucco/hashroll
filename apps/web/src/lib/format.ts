@@ -1,10 +1,10 @@
-import { decodePlinkoPath, plinkoSlot, plinkoTable, rouletteColor, ROLL_RANGE } from "@hashroll/fair";
+import { decodePlinkoPath, decodeSlotGrid, slotWins, plinkoSlot, plinkoTable, rouletteColor, ROLL_RANGE } from "@hashroll/fair";
 import type { BetHistoryEntry, Game } from "@hashroll/program";
 
 export const fmtRoll = (r: number) => (r / 100).toFixed(2);
 export const fmtMultiplier = (bps: number) => `${(bps / 10_000).toLocaleString("en-US", { maximumFractionDigits: 2 })}x`;
 
-export const GAME_LABEL: Record<Game, string> = { dice: "Dice", plinko: "Plinko", roulette: "Roulette" };
+export const GAME_LABEL: Record<Game, string> = { dice: "Dice", plinko: "Plinko", roulette: "Roulette", slots: "Slots" };
 
 /** One-line description of a settled outcome, for history tables. */
 export function describeOutcome(b: BetHistoryEntry): string {
@@ -20,6 +20,11 @@ export function describeOutcome(b: BetHistoryEntry): string {
     }
     case "roulette":
       return `${b.outcome} ${rouletteColor(b.outcome)} · ${b.bet.chips.length} chip${b.bet.chips.length > 1 ? "s" : ""}`;
+    case "slots": {
+      const { lines, fullBoard } = slotWins(decodeSlotGrid(b.outcome));
+      if (lines.length === 0) return "no line";
+      return `${lines.length} line${lines.length > 1 ? "s" : ""}${fullBoard ? " · full board ×10" : ""}`;
+    }
   }
 }
 
