@@ -36,7 +36,7 @@ hashroll/
 │   └── keys/dev/               localnet-only keypairs, so addresses stay stable
 ├── apps/
 │   ├── api/                    @hashroll/api: NestJS house service and settler loop
-│   └── web/                    @hashroll/web: Next.js UI, wallet adapter, PixiJS and Three.js game stages
+│   └── web/                    @hashroll/web: Next.js UI, wallet adapter, PixiJS game stages
 └── docker-compose.yml          solana-test-validator (+ Postgres, not used yet)
 ```
 
@@ -167,8 +167,7 @@ Next.js 16 with Tailwind 4 and the Solana wallet adapter. The web app reads bala
 | `src/lib/useHashroll.ts` | Central hook: loads config, vault, player, balances and history; exposes `play`, `claimExpired`, `withdrawOwed`, `faucet` |
 | `src/lib/solana.ts`, `src/lib/api.ts` | RPC connection / Anchor program, and the API client |
 | `src/app/{dice,plinko,roulette}/page.tsx` | One page per game, built on `components/GameShell.tsx` |
-| `src/games/{plinko,roulette}Stage.ts` | PixiJS scenes, mounted by `usePixiStage.ts` |
-| `src/games/diceStage.ts` | Three.js scene (a 3D 0–100 lane with a draggable gate), mounted by `useThreeStage.ts` |
+| `src/games/*Stage.ts` | PixiJS scenes, mounted by `usePixiStage.ts`; Dice is a 2.5D 0–100 lane with a draggable gate |
 | `src/app/verify/page.tsx` | Independent verifier: recomputes any bet with `@hashroll/fair` in the browser, no API call |
 | `src/lib/sound.ts`, `effects.ts`, `fx.ts` | Sound and celebration effects |
 

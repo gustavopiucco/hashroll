@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { MAX_TARGET, MIN_TARGET, ROLL_RANGE, payoutFor } from "@hashroll/fair";
 import { formatHroll, parseHroll, type BetHistoryEntry, type Direction } from "@hashroll/program";
 import { GameShell } from "@/components/GameShell";
 import { AmountInput, Seg, Stat } from "@/components/ui";
-import { useThreeStage } from "@/games/useThreeStage";
+import { createDiceStage, diceSize } from "@/games/diceStage";
+import { usePixiStage } from "@/games/usePixiStage";
 import { celebrate } from "@/lib/effects";
 import { fmtRoll, verifyHref } from "@/lib/format";
 import { sfx } from "@/lib/sound";
@@ -15,7 +16,13 @@ import { useHashroll } from "@/lib/useHashroll";
 /** Gross multipliers offered as one-click odds. */
 const PRESETS = [1.1, 1.5, 2, 5, 10];
 
-const loadStage = () => import("@/games/diceStage").then((m) => m.createDiceStage);
+/** Below this width the lane switches to its compact scene. */
+const NARROW = "(max-width: 639px)";
+const watchNarrow = (onChange: () => void) => {
+  const query = window.matchMedia(NARROW);
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
+};
 
 type Phase = "idle" | "rolling" | "revealing" | "done";
 
@@ -27,7 +34,9 @@ export default function DicePage() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [last, setLast] = useState<BetHistoryEntry | null>(null);
   const [recent, setRecent] = useState<{ id: number; roll: number; win: boolean }[]>([]);
-  const { hostRef, host, stageRef, ready, failed } = useThreeStage(loadStage);
+  const narrow = useSyncExternalStore(watchNarrow, () => window.matchMedia(NARROW).matches, () => false);
+  const size = diceSize(narrow);
+  const { hostRef, host, stageRef, ready, failed } = usePixiStage(size.width, size.height, createDiceStage);
 
   const edge = hr.house?.houseEdgeBps ?? 100;
   const multiplier = Number(payoutFor(10_000n, target, edge)) / 10_000;
@@ -169,11 +178,12 @@ export default function DicePage() {
           ref={hostRef}
           role="img"
           aria-label={`Dice lane from 0 to 100, wins if roll ${rule}`}
-          className="relative mx-auto mt-3 aspect-[5/4] w-full max-w-[820px] select-none sm:aspect-[2/1]"
+          className="mx-auto mt-3 w-full max-w-[820px] select-none"
+          style={{ aspectRatio: `${size.width} / ${size.height}` }}
         />
       )}
 
-      {/* Keyboard and screen-reader control for the gate; the only slider when WebGL is unavailable. */}
+      {/* Keyboard and screen-reader control for the gate; the only slider when the game canvas cannot start. */}
       <input
         type="range"
         aria-label="Gate position"

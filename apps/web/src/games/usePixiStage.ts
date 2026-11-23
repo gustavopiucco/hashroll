@@ -29,7 +29,8 @@ function cssFont(variable: string, fallback: string) {
 /**
  * Mounts a PixiJS scene into a host div. Pixi is imported lazily so it never runs during
  * prerender; init is async, so a cancelled flag covers StrictMode's double effect and fast
- * unmounts. If WebGL is unavailable the stage stays null and callers skip the animation.
+ * unmounts. Pixi falls back to its canvas renderer without WebGL; if it cannot start at all `failed` becomes
+ * true, the stage stays null and callers skip the animation or fall back to plain controls.
  */
 export function usePixiStage<S extends Stage>(width: number, height: number, create: (ctx: StageContext) => S) {
   // A callback ref: the host may mount later (e.g. after the wallet connects), which must re-run init.
@@ -37,6 +38,7 @@ export function usePixiStage<S extends Stage>(width: number, height: number, cre
   const stageRef = useRef<S | null>(null);
   const createRef = useRef(create);
   const [ready, setReady] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     createRef.current = create;
@@ -80,7 +82,10 @@ export function usePixiStage<S extends Stage>(width: number, height: number, cre
         reduced: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
       });
       setReady(true);
-    })().catch((e) => console.warn("game canvas unavailable, animations disabled:", e));
+    })().catch((e) => {
+      console.warn("game canvas unavailable, animations disabled:", e);
+      if (!cancelled) setFailed(true);
+    });
 
     return () => {
       cancelled = true;
@@ -91,5 +96,5 @@ export function usePixiStage<S extends Stage>(width: number, height: number, cre
     };
   }, [host, width, height]);
 
-  return { hostRef, host, stageRef, ready };
+  return { hostRef, host, stageRef, ready, failed };
 }

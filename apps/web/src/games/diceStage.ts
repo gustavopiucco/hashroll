@@ -1,31 +1,41 @@
-import * as THREE from "three";
-import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
-import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
+import type { Sprite, Ticker } from "pixi.js";
 import { MAX_TARGET, MIN_TARGET, ROLL_RANGE, type Direction } from "@hashroll/fair";
 import { fmtRoll as fmt } from "@/lib/format";
 import { sfx } from "@/lib/sound";
-import { clamp01, easeOutCubic } from "./fx";
-import type { ThreeStage, ThreeStageContext } from "./useThreeStage";
+import { Fx, clamp01, easeOutCubic, glowCircle, mixColor } from "./fx";
+import type { Stage, StageContext } from "./usePixiStage";
 
 /*
- * The scene is a physical 0–100 number line: a lane split into a green (win) and a pink (lose) zone by a
- * gate the player drags. The die carries the rolled number on its faces and lands exactly at that number,
- * so "did it stop on green?" is the whole game. The camera never yaws, so a roll maps linearly to screen x.
+ * The scene is a physical 0–100 number line drawn in 2.5D: a lane split into a green (win) and a pink (lose)
+ * zone by a gate the player drags. The die carries the rolled number on its faces and lands exactly at that
+ * number, so "did it stop on green?" is the whole game.
+ *
+ * Everything is seen through an orthographic camera pitched down by PITCH with no yaw, so a roll maps
+ * linearly to screen x at any depth. The lane and the gate are plain 2D shapes laid out for that view; the
+ * die is a real cube whose faces are projected one by one.
  */
 
-const LANE_L = 10;
-const LANE_D = 2.4;
-const LIP_Z = 1.75; // centre line of the front lip that holds the scale and the gate's handle
-const HANDLE_Z = 2.2;
-const DIE = 1.35;
-const HOVER_Y = 1.75;
+/** Logical scene size. Narrow screens get a smaller scene so the die and the handle stay readable. */
+export const diceSize = (narrow: boolean) => (narrow ? { width: 520, height: 420 } : { width: 820, height: 440 });
+
+const PITCH = Math.PI / 6;
+const COS = Math.cos(PITCH);
+const SIN = Math.sin(PITCH);
+const PAD = 44;
+const LANE_D = 110; // on-screen depth of the lane's top face
+const FRONT = 18; // on-screen height of the lane's front side
+const ARCH = 118;
+const DIE = 84;
+const HOVER = 108; // height of the die's centre while it floats
+const TEX = 256;
 const SNAP = 50;
 const BRAND = 0x2cf0a4;
 const HOT = 0xff3d7f;
 const WHITE = 0xffffff;
+const FOCUS = 0x4cc9ff;
 const REVEAL_MS = 1_900;
 
-export interface DiceStage extends ThreeStage {
+export interface DiceStage extends Stage {
   /** Called while the player drags the gate (or taps the lane) with the new number of winning outcomes. */
   onTarget: ((target: number) => void) | null;
   setZone(target: number, direction: Direction, winLabel: string): void;
@@ -43,8 +53,6 @@ export interface DiceStage extends ThreeStage {
 type Tone = "neutral" | "win" | "lose";
 const TONE_COLOR: Record<Tone, number> = { neutral: WHITE, win: BRAND, lose: HOT };
 
-const xOf = (roll: number) => (roll / ROLL_RANGE - 0.5) * LANE_L;
-const rollAt = (x: number) => (x / LANE_L + 0.5) * ROLL_RANGE;
 const splitOf = (target: number, direction: Direction) => (direction === "under" ? target : ROLL_RANGE - target);
 const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
 const css = (color: number) => `#${color.toString(16).padStart(6, "0")}`;
@@ -55,9 +63,9 @@ const wrap = (angle: number) => {
 
 /** Height of the throw at progress k: a fall followed by three decaying bounces. */
 const BOUNCES = [
-  { from: 0.28, to: 0.55, h: 0.95 },
-  { from: 0.55, to: 0.75, h: 0.42 },
-  { from: 0.75, to: 0.88, h: 0.14 },
+  { from: 0.28, to: 0.55, h: 59 },
+  { from: 0.55, to: 0.75, h: 26 },
+  { from: 0.75, to: 0.88, h: 9 },
 ];
 function throwHeight(k: number, start: number) {
   const fall = BOUNCES[0].from;
@@ -74,217 +82,167 @@ function throwHeight(k: number, start: number) {
   return 0;
 }
 
-/** Canvas-backed texture that only repaints when its content changes. */
-class Label {
-  readonly texture: THREE.CanvasTexture;
-  private g: CanvasRenderingContext2D;
-  private key = "";
+/*
+ * Cube faces in die space (x right, y up, z towards the viewer). Each face names the axis and sign of its
+ * outward normal, of its texture's right and of its texture's down, so every number reads upright from outside.
+ */
+const FACES: readonly (readonly [number, number, number, number, number, number])[] = [
+  [2, 1, 0, 1, 1, -1], // front
+  [2, -1, 0, -1, 1, -1], // back
+  [0, 1, 2, -1, 1, -1], // right
+  [0, -1, 2, 1, 1, -1], // left
+  [1, 1, 0, 1, 2, 1], // top
+  [1, -1, 0, 1, 2, -1], // bottom
+];
+const LIGHT = [-0.25, 0.75, 0.61];
 
-  constructor(private w: number, private h: number, anisotropy: number) {
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    this.g = canvas.getContext("2d")!;
-    this.texture = new THREE.CanvasTexture(canvas);
-    this.texture.colorSpace = THREE.SRGBColorSpace;
-    this.texture.anisotropy = anisotropy;
-  }
+export function createDiceStage(ctx: StageContext): DiceStage {
+  const { PIXI, app, reduced, fonts, width: W, height: H } = ctx;
+  const canvas = app.canvas;
 
-  draw(text: string, font: string, color: string, background?: string) {
-    const key = `${text}|${font}|${color}|${background}`;
-    if (key === this.key) return;
-    this.key = key;
-    const { g, w, h } = this;
-    g.clearRect(0, 0, w, h);
-    if (background) {
-      g.fillStyle = background;
-      g.fillRect(0, 0, w, h);
-    }
-    g.font = font;
-    g.textAlign = "center";
-    g.textBaseline = "middle";
-    g.fillStyle = color;
-    g.fillText(text, w / 2, h / 2 + h * 0.03, w * 0.94);
-    this.texture.needsUpdate = true;
-  }
-}
-
-export function createDiceStage(ctx: ThreeStageContext): DiceStage {
-  const { renderer, host, reduced, fonts } = ctx;
-  const canvas = renderer.domElement;
-  const aniso = Math.min(8, renderer.capabilities.getMaxAnisotropy());
-
-  renderer.toneMapping = THREE.NeutralToneMapping;
-  renderer.shadowMap.enabled = true;
-
-  const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(18, 16 / 9, 0.1, 100);
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  const room = new RoomEnvironment();
-  const environment = pmrem.fromScene(room, 0.04);
-  room.dispose();
-  pmrem.dispose();
-  scene.environment = environment.texture;
-  scene.environmentIntensity = 0.3;
-
-  const key = new THREE.DirectionalLight(0xffffff, 1.5);
-  key.position.set(-1.2, 10, 3);
-  key.castShadow = true;
-  key.shadow.mapSize.set(1024, 1024);
-  key.shadow.radius = 5;
-  key.shadow.bias = -0.0005;
-  key.shadow.normalBias = 0.02;
-  Object.assign(key.shadow.camera, { left: -7, right: 7, top: 5, bottom: -4, near: 1, far: 18 });
-  const flash = new THREE.PointLight(WHITE, 0, 6);
-  scene.add(key, flash);
+  const laneL = W - 2 * PAD;
+  const x0 = PAD;
+  const x1 = W - PAD;
+  const laneMid = H - 155;
+  const laneT = laneMid - LANE_D / 2;
+  const laneB = laneMid + LANE_D / 2;
+  const handleY = laneB + FRONT + 48;
+  const xOf = (roll: number) => x0 + (roll / ROLL_RANGE) * laneL;
+  const rollAt = (x: number) => ((x - x0) / laneL) * ROLL_RANGE;
 
   // Everything that shakes on a loss hangs from here.
-  const root = new THREE.Group();
-  scene.add(root);
+  const root = new PIXI.Container();
+  app.stage.addChild(root);
+  const fx = new Fx(ctx);
 
   /* ------------------------------- Lane ------------------------------- */
 
-  const base = new THREE.Mesh(
-    new RoundedBoxGeometry(LANE_L + 1.1, 0.5, LANE_D + 1.5, 4, 0.18),
-    new THREE.MeshPhysicalMaterial({ color: 0x1a1d45, roughness: 0.55, metalness: 0.2, clearcoat: 0.3, clearcoatRoughness: 0.5 }),
-  );
-  base.position.set(0, -0.31, 0.4);
-  base.receiveShadow = true;
-  root.add(base);
+  const base = new PIXI.Graphics()
+    .roundRect(x0 - 16, laneT - 12, laneL + 32, LANE_D + 24 + FRONT + 34, 16)
+    .fill({ color: 0x101233 })
+    .roundRect(x0 - 16, laneT - 12, laneL + 32, LANE_D + 24, 16)
+    .fill({ color: 0x1a1d45 });
+  root.addChild(base);
 
-  // Unit-wide slab anchored at its left edge: resizing a zone is just a scale.
-  const slab = new THREE.BoxGeometry(1, 0.12, LANE_D).translate(0.5, -0.06, 0);
-  const zoneMesh = (color: number) => {
-    const m = new THREE.Mesh(slab, new THREE.MeshPhysicalMaterial({ color, emissive: color, emissiveIntensity: 0.12, roughness: 0.6, clearcoat: 0.1 }));
-    m.receiveShadow = true;
-    root.add(m);
-    return m;
+  const zoneText = (ink: number) => {
+    const t = new PIXI.Text({ text: "", style: { fontFamily: fonts.display, fontSize: 38, fontWeight: "900", fill: ink } });
+    t.anchor.set(0.5);
+    t.y = laneMid + 28;
+    t.alpha = 0.9;
+    return t;
   };
-  const winZone = zoneMesh(BRAND);
-  const loseZone = zoneMesh(HOT);
-
-  const flat = (w: number, h: number, material: THREE.Material, x: number, y: number, z: number) => {
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), material);
-    m.rotation.x = -Math.PI / 2;
-    m.position.set(x, y, z);
-    root.add(m);
-    return m;
+  // White sprites tinted and stretched: resizing a zone is just a width.
+  const zone = (color: number, ink: number) => {
+    const top = new PIXI.Sprite(PIXI.Texture.WHITE);
+    top.tint = color;
+    top.y = laneT;
+    top.height = LANE_D;
+    const side = new PIXI.Sprite(PIXI.Texture.WHITE);
+    side.tint = mixColor(color, 0x000000, 0.45);
+    side.y = laneB;
+    side.height = FRONT;
+    root.addChild(top, side);
+    return { top, side, text: zoneText(ink) };
   };
-  const textMaterial = (label: Label, opacity = 1) =>
-    new THREE.MeshBasicMaterial({ map: label.texture, transparent: true, opacity, depthWrite: false, toneMapped: false });
+  const winZone = zone(BRAND, 0x04301f);
+  const loseZone = zone(HOT, 0x4d0420);
 
-  const tickMaterial = new THREE.MeshBasicMaterial({ color: WHITE, transparent: true, opacity: 0.22, depthWrite: false });
-  for (let v = 10; v < 100; v += 10) flat(v === 50 ? 0.035 : 0.018, LANE_D, tickMaterial, xOf(v * 100), 0.004, 0);
-  for (const v of [0, 25, 50, 75, 100]) {
-    const label = new Label(128, 64, aniso);
-    label.draw(String(v), `700 46px ${fonts.mono}`, "#a9aee0");
-    flat(1, 0.5, textMaterial(label), xOf(v * 100), -0.05, LIP_Z - 0.05);
+  // Brightens the zone the die landed on.
+  const zoneGlow = new PIXI.Sprite(PIXI.Texture.WHITE);
+  zoneGlow.blendMode = "add";
+  zoneGlow.y = laneT;
+  zoneGlow.height = LANE_D;
+  zoneGlow.alpha = 0;
+
+  const ticks = new PIXI.Graphics();
+  for (let v = 10; v < 100; v += 10) {
+    const w = v === 50 ? 3 : 1.5;
+    ticks.rect(xOf(v * 100) - w / 2, laneT, w, LANE_D).fill({ color: WHITE, alpha: 0.22 });
   }
+  root.addChild(zoneGlow, ticks, winZone.text, loseZone.text);
 
-  const zoneText = () => {
-    const label = new Label(512, 128, aniso);
-    return { label, mesh: flat(1, 1, textMaterial(label, 0.9), 0, 0.008, 0.55) };
-  };
-  const winText = zoneText();
-  const loseText = zoneText();
+  for (const v of [0, 25, 50, 75, 100]) {
+    const t = new PIXI.Text({ text: String(v), style: { fontFamily: fonts.mono, fontSize: 13, fontWeight: "700", fill: 0xa9aee0 } });
+    t.anchor.set(0.5, 0);
+    t.position.set(xOf(v * 100), laneB + FRONT + 7);
+    root.addChild(t);
+  }
 
   /* ------------------------------- Gate ------------------------------- */
 
-  const gate = new THREE.Group();
-  root.add(gate);
-  const gateMaterial = new THREE.MeshStandardMaterial({ color: WHITE, emissive: 0xcfd3ff, emissiveIntensity: 0.55, roughness: 0.3 });
-  const bar = (w: number, h: number, d: number, x: number, y: number, z: number) => {
-    const m = new THREE.Mesh(new RoundedBoxGeometry(w, h, d, 2, 0.04), gateMaterial);
-    m.position.set(x, y, z);
-    m.castShadow = true;
-    gate.add(m);
-  };
-  const ARCH = 2.1;
-  bar(0.09, 0.05, LANE_D, 0, 0.01, 0);
-  bar(0.09, ARCH, 0.09, 0, ARCH / 2, -LANE_D / 2);
-  bar(0.09, 0.07, HANDLE_Z - LANE_D / 2, 0, -0.03, (HANDLE_Z + LANE_D / 2) / 2);
+  // The line on the lane and the post at its far edge sit behind the die; the handle sits in front.
+  const gateBack = new PIXI.Graphics()
+    .rect(-2.5, laneT, 5, LANE_D)
+    .roundRect(-4.5, laneT - ARCH, 9, ARCH + 4, 4.5)
+    .fill({ color: WHITE });
+  const gateFront = new PIXI.Container();
+  gateFront.addChild(new PIXI.Graphics().rect(-2.5, laneB, 5, handleY - laneB).fill({ color: WHITE }));
 
-  const handleLabel = new Label(384, 160, aniso);
-  const handleSide = new THREE.MeshPhysicalMaterial({ color: WHITE, roughness: 0.25, clearcoat: 1 });
-  const handleFront = new THREE.MeshBasicMaterial({ map: handleLabel.texture, toneMapped: false });
-  const handle = new THREE.Mesh(new RoundedBoxGeometry(1.5, 0.56, 0.3, 4, 0.12), [
-    handleSide, handleSide, handleSide, handleSide, handleFront, handleSide,
-  ]);
-  // Hangs over the front edge, low enough not to hide the needle when the die lands next to the gate.
-  handle.position.set(0, -0.1, HANDLE_Z);
-  handle.rotation.x = -0.5;
-  handle.castShadow = true;
-  gate.add(handle);
+  const HANDLE_W = 128;
+  const handle = new PIXI.Container();
+  handle.y = handleY;
+  const handleRing = new PIXI.Graphics().roundRect(-HANDLE_W / 2 - 4, -24, HANDLE_W + 8, 48, 18).stroke({ width: 3, color: FOCUS });
+  handleRing.visible = false;
+  const handleText = new PIXI.Text({ text: "", style: { fontFamily: fonts.display, fontSize: 22, fontWeight: "800", fill: 0x14163a } });
+  handleText.anchor.set(0.5);
+  handle.addChild(
+    new PIXI.Graphics()
+      .roundRect(-HANDLE_W / 2, -15, HANDLE_W, 40, 14)
+      .fill({ color: 0x000000, alpha: 0.4 })
+      .roundRect(-HANDLE_W / 2, -20, HANDLE_W, 40, 14)
+      .fill({ color: WHITE }),
+    handleRing,
+    handleText,
+  );
+  gateFront.addChild(handle);
 
   /* -------------------------------- Die ------------------------------- */
 
-  const faceLabel = new Label(256, 256, aniso);
-  const die = new THREE.Mesh(
-    new RoundedBoxGeometry(DIE, DIE, DIE, 5, 0.2),
-    new THREE.MeshPhysicalMaterial({ map: faceLabel.texture, roughness: 0.22, clearcoat: 1, clearcoatRoughness: 0.15 }),
-  );
-  die.castShadow = true;
-  root.add(die);
+  // A few stacked translucent shapes fake a soft edge (cheaper than a blur filter).
+  const shadow = new PIXI.Graphics();
+  for (let i = 0; i < 4; i++) {
+    const grow = i * 4;
+    shadow.roundRect(-DIE / 2 - grow, (-DIE * SIN) / 2 - grow, DIE + grow * 2, DIE * SIN + grow * 2, 10 + grow).fill({ color: 0x000000, alpha: 0.17 });
+  }
+  shadow.y = laneMid;
 
-  // Needle on the scale: marks the exact number under the die's centre.
-  const needle = new THREE.Mesh(
-    new THREE.CircleGeometry(0.2, 3, Math.PI / 2),
-    new THREE.MeshBasicMaterial({ color: WHITE, toneMapped: false }),
-  );
-  needle.rotation.x = -Math.PI / 2;
-  needle.position.set(0, 0.02, LANE_D / 2 + 0.2);
+  const dieGlow = glowCircle(new PIXI.Graphics(), 0, 0, DIE * 0.62, WHITE, 1.6);
+  dieGlow.blendMode = "add";
+  dieGlow.alpha = 0;
+
+  // One canvas holds the face artwork; all six faces share it, so a new number is a single repaint.
+  const faceCanvas = document.createElement("canvas");
+  faceCanvas.width = faceCanvas.height = TEX;
+  const faceG = faceCanvas.getContext("2d")!;
+  const faceTexture = PIXI.Texture.from(faceCanvas);
+  const die = new PIXI.Container();
+  const faces: Sprite[] = FACES.map(() => {
+    const s = new PIXI.Sprite(faceTexture);
+    s.anchor.set(0.5);
+    die.addChild(s);
+    return s;
+  });
+
+  // Needle on the lane's front edge: marks the exact number under the die's centre.
+  const needle = new PIXI.Graphics().poly([-9, 15, 9, 15, 0, 1]).fill({ color: WHITE });
+  needle.y = laneB;
   needle.visible = false;
-  root.add(needle);
 
-  /* ------------------------------ Effects ----------------------------- */
-
-  const ring = new THREE.Mesh(
-    new THREE.RingGeometry(0.9, 1, 64),
-    new THREE.MeshBasicMaterial({ color: WHITE, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }),
-  );
-  ring.rotation.x = -Math.PI / 2;
+  const ring = new PIXI.Graphics().ellipse(0, 0, 60, 60 * SIN).stroke({ width: 3, color: WHITE });
+  ring.blendMode = "add";
+  ring.y = laneMid;
   ring.visible = false;
-  root.add(ring);
   let ringLife = 0;
   let ringSize = 1;
 
-  const SPARKS = 90;
-  const sparkPos = new Float32Array(SPARKS * 3);
-  const sparkVel = new Float32Array(SPARKS * 3);
-  const sparkGeometry = new THREE.BufferGeometry();
-  sparkGeometry.setAttribute("position", new THREE.BufferAttribute(sparkPos, 3));
-  const sparkMaterial = new THREE.PointsMaterial({ size: 0.11, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
-  const sparks = new THREE.Points(sparkGeometry, sparkMaterial);
-  sparks.frustumCulled = false;
-  sparks.visible = false;
-  root.add(sparks);
-  let sparkLife = 0;
+  const readout = new PIXI.Text({
+    text: "",
+    style: { fontFamily: fonts.display, fontSize: W < 600 ? 50 : 62, fontWeight: "900", fill: WHITE, letterSpacing: 1 },
+  });
+  readout.anchor.set(0.5);
+  readout.position.set(W / 2, 46);
 
-  const shockwave = (x: number, color: number, size: number) => {
-    if (reduced) return;
-    ring.position.set(x, 0.02, 0);
-    ring.material.color.set(color);
-    ringSize = size;
-    ringLife = 1;
-  };
-  const burst = (x: number, y: number, color: number, speed: number) => {
-    if (reduced) return;
-    for (let i = 0; i < SPARKS; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const up = 0.4 + Math.random() * 0.9;
-      const s = speed * (0.3 + Math.random() * 0.7);
-      sparkPos.set([x, y, 0], i * 3);
-      sparkVel.set([Math.cos(a) * s, up * speed, Math.sin(a) * s * 0.7], i * 3);
-    }
-    sparkMaterial.color.set(color);
-    sparkLife = 1;
-  };
-
-  // The big readout is DOM: crisp at any size and free to update every frame.
-  const readout = document.createElement("div");
-  readout.className = "pointer-events-none absolute inset-x-0 top-0 text-center font-display text-5xl font-black leading-none tabular-nums sm:text-7xl";
-  readout.setAttribute("aria-hidden", "true");
-  host.appendChild(readout);
+  root.addChild(gateBack, shadow, ring, dieGlow, die, needle, gateFront, fx.layer, readout);
 
   /* ------------------------------- State ------------------------------ */
 
@@ -292,7 +250,6 @@ export function createDiceStage(ctx: ThreeStageContext): DiceStage {
   let time = 0;
   let tone: Tone = "neutral";
   let faceText = "?";
-  let dieScale = 1;
   let shuffleAt = 0;
   let shake = 0;
   let pulse = 0;
@@ -308,71 +265,148 @@ export function createDiceStage(ctx: ThreeStageContext): DiceStage {
   let anim: ((dt: number) => void) | null = null;
   let resolveReveal: (() => void) | null = null;
 
+  /** Die pose: x along the lane in scene pixels, y the height of its centre above the lane, Euler angles. */
+  const pos = { x: W / 2, y: HOVER };
+  const rot = { x: 0, y: 0, z: 0 };
+  /** Rotation matrix for `rot` (row-major, XYZ order). */
+  const m = new Float64Array(9);
+  const matrix = new PIXI.Matrix();
+
+  const shockwave = (x: number, color: number, size: number) => {
+    if (reduced) return;
+    ring.x = x;
+    ring.tint = color;
+    ringSize = size;
+    ringLife = 1;
+  };
+
+  let painted = "";
   const paintDie = () => {
     const bg = tone === "neutral" ? "#f4f5ff" : css(TONE_COLOR[tone]);
     const ink = tone === "lose" ? "#ffffff" : "#0c0d24";
-    faceLabel.draw(faceText, `900 ${faceText.length > 1 ? 72 : 150}px ${fonts.display}`, ink, bg);
-  };
-  const paintReadout = (text: string) => {
-    readout.textContent = text;
-    readout.style.color = css(TONE_COLOR[tone]);
-    readout.style.textShadow = tone === "neutral" ? "none" : `0 0 32px ${css(TONE_COLOR[tone])}99`;
+    const key = `${faceText}|${bg}`;
+    if (key === painted) return;
+    painted = key;
+    const g = faceG;
+    g.clearRect(0, 0, TEX, TEX);
+    g.beginPath();
+    g.roundRect(0, 0, TEX, TEX, 22);
+    g.fillStyle = bg;
+    g.fill();
+    g.beginPath();
+    g.roundRect(5, 5, TEX - 10, TEX - 10, 18);
+    g.lineWidth = 10;
+    // Coloured faces get a heavier rim, or a winning die would melt into the green zone it sits on.
+    g.strokeStyle = `rgba(12, 13, 36, ${tone === "neutral" ? 0.14 : 0.32})`;
+    g.stroke();
+    g.font = `900 ${faceText.length > 1 ? 78 : 150}px ${fonts.display}`;
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillStyle = ink;
+    g.fillText(faceText, TEX / 2, TEX / 2 + TEX * 0.03, TEX * 0.86);
+    faceTexture.source.update();
   };
   const show = (text: string) => {
     faceText = text;
     paintDie();
-    paintReadout(text === "?" ? "" : text);
+    readout.text = text === "?" ? "" : text;
   };
   const setTone = (next: Tone) => {
     tone = next;
-    needle.material.color.set(TONE_COLOR[next]);
+    const color = TONE_COLOR[next];
+    needle.tint = color;
+    dieGlow.tint = color;
+    zoneGlow.tint = color;
+    readout.style.fill = color;
     show(faceText);
   };
 
-  const layoutZones = () => {
-    const x = xOf(shownSplit);
-    const left = -LANE_L / 2;
-    const right = LANE_L / 2;
-    const under = direction === "under";
-    const place = (mesh: THREE.Mesh, text: ReturnType<typeof zoneText>, a: number, b: number, value: string, ink: string) => {
-      const w = Math.max(0.001, b - a);
-      mesh.position.x = a;
-      mesh.scale.x = w;
-      const textW = Math.min(3, w * 0.86);
-      text.mesh.visible = textW > 0.75;
-      text.mesh.scale.set(textW, textW / 3, 1);
-      text.mesh.position.x = (a + b) / 2;
-      text.label.draw(value, `900 96px ${fonts.display}`, ink);
-    };
-    place(winZone, winText, under ? left : x, under ? x : right, winLabel, "#04301f");
-    place(loseZone, loseText, under ? x : left, under ? right : x, "LOSE", "#4d0420");
-    gate.position.x = x;
-    handleLabel.draw(`‹ ${fmt(split)} ›`, `800 72px ${fonts.display}`, "#14163a", "#ffffff");
+  /** Projects the cube: hides the faces that point away and skews each visible one into place. */
+  const poseDie = () => {
+    const a = Math.cos(rot.x), b = Math.sin(rot.x);
+    const c = Math.cos(rot.y), d = Math.sin(rot.y);
+    const e = Math.cos(rot.z), f = Math.sin(rot.z);
+    m[0] = c * e;             m[1] = -c * f;            m[2] = d;
+    m[3] = a * f + b * e * d; m[4] = a * e - b * f * d; m[5] = -b * c;
+    m[6] = b * f - a * e * d; m[7] = b * e + a * f * d; m[8] = a * c;
+
+    const k = DIE / TEX;
+    for (let i = 0; i < FACES.length; i++) {
+      const [nAxis, nSign, uAxis, uSign, dAxis, dSign] = FACES[i];
+      const nx = m[nAxis] * nSign, ny = m[3 + nAxis] * nSign, nz = m[6 + nAxis] * nSign;
+      const sprite = faces[i];
+      // The viewer sits along (0, SIN, COS).
+      sprite.visible = ny * SIN + nz * COS > 0.02;
+      if (!sprite.visible) continue;
+      const ux = m[uAxis] * uSign, uy = m[3 + uAxis] * uSign, uz = m[6 + uAxis] * uSign;
+      const dx = m[dAxis] * dSign, dy = m[3 + dAxis] * dSign, dz = m[6 + dAxis] * dSign;
+      matrix.set(
+        ux * k, (uz * SIN - uy * COS) * k,
+        dx * k, (dz * SIN - dy * COS) * k,
+        (nx * DIE) / 2, ((nz * SIN - ny * COS) * DIE) / 2,
+      );
+      sprite.setFromMatrix(matrix);
+      const lit = Math.max(0, nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]);
+      const shade = Math.round(255 * (0.6 + 0.4 * lit));
+      sprite.tint = (shade << 16) | (shade << 8) | shade;
+    }
+
+    die.position.set(pos.x, laneMid - pos.y * COS);
+    dieGlow.position.copyFrom(die.position);
+    const lift = Math.max(0, pos.y - DIE / 2);
+    // The light comes from the left, so the shadow slides right as the die rises.
+    shadow.x = pos.x + 7 + lift * 0.12;
+    shadow.scale.set(1 + lift / 260);
+    shadow.alpha = Math.max(0.15, 1 - lift / 190);
+  };
+  /** Half of the die's vertical extent for its current rotation, so it never sinks into the lane. */
+  const support = () => {
+    poseDie();
+    return (DIE / 2) * Math.min(1.45, Math.abs(m[3]) + Math.abs(m[4]) + Math.abs(m[5]));
   };
 
-  /** Half of the die's vertical extent for its current rotation, so it never sinks into the lane. */
-  const rot = new THREE.Matrix4();
-  const support = () => {
-    const e = rot.makeRotationFromEuler(die.rotation).elements;
-    return (DIE / 2) * dieScale * Math.min(1.45, Math.abs(e[1]) + Math.abs(e[5]) + Math.abs(e[9]));
+  const placeHandle = (wiggle = 0) => {
+    // Near the ends of the lane the handle stays inside the canvas while the gate keeps moving.
+    const half = HANDLE_W / 2 + 6;
+    handle.x = clamp(gateFront.x, half, W - half) - gateFront.x + wiggle;
   };
-  const hoverY = () => HOVER_Y + (dieScale - 1) * DIE;
+  const layoutZones = () => {
+    const x = xOf(shownSplit);
+    const under = direction === "under";
+    const place = (z: ReturnType<typeof zone>, a: number, b: number, value: string) => {
+      const w = Math.max(0.001, b - a);
+      z.top.x = z.side.x = a;
+      z.top.width = z.side.width = w;
+      if (z.text.text !== value) z.text.text = value;
+      z.text.visible = w > 70 && value !== "";
+      if (!z.text.visible) return;
+      z.text.scale.set(1);
+      const s = Math.min(1, (w * 0.86) / z.text.width);
+      // Squashed vertically so the label lies on the lane.
+      z.text.scale.set(s, s * 0.6);
+      z.text.x = (a + b) / 2;
+    };
+    place(winZone, under ? x0 : x, under ? x : x1, winLabel);
+    place(loseZone, under ? x : x0, under ? x1 : x, "LOSE");
+    gateBack.x = gateFront.x = x;
+    placeHandle();
+    handleText.text = `‹ ${fmt(split)} ›`;
+  };
 
   const finish = (roll: number, win: boolean) => {
     mode = "done";
     anim = null;
-    die.rotation.set(0, 0, 0);
-    die.position.set(xOf(roll), (DIE / 2) * dieScale, 0);
-    needle.position.x = die.position.x;
+    rot.x = rot.y = rot.z = 0;
+    pos.x = xOf(roll);
+    pos.y = DIE / 2;
+    needle.x = pos.x;
     needle.visible = true;
     faceText = fmt(roll);
     setTone(win ? "win" : "lose");
     const color = TONE_COLOR[tone];
     pulse = reduced ? 0 : 1;
-    flash.color.set(color);
-    flash.position.set(die.position.x, 1.6, 2.4);
-    shockwave(die.position.x, color, win ? 2.2 : 1.6);
-    if (win) burst(die.position.x, DIE / 2, color, 4.2);
+    shockwave(pos.x, color, win ? 2.2 : 1.6);
+    if (win) fx.burst(pos.x, laneMid - DIE / 2, color, 60, 6);
     else if (!reduced) shake = 1;
     sfx.land();
     const r = resolveReveal;
@@ -382,26 +416,18 @@ export function createDiceStage(ctx: ThreeStageContext): DiceStage {
 
   /* ---------------------------- Gate dragging --------------------------- */
 
-  const ray = new THREE.Raycaster();
-  const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-  const backPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), LANE_D / 2); // where the gate's post stands
-  const hit = new THREE.Vector3();
   let grabOffset = 0;
-  let grabY = 0;
   let tap: { x: number; y: number } | null = null;
 
-  /** Where the pointer touches the lane (or the gate's post above it), or null when outside. */
-  const pick = (clientX: number, clientY: number): { x: number; onGate: boolean; onLane: boolean } | null => {
+  /** Where the pointer is in scene pixels, and whether it is over the gate or the lane. */
+  const pick = (clientX: number, clientY: number) => {
     const r = canvas.getBoundingClientRect();
-    ray.setFromCamera(new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, 1 - ((clientY - r.top) / r.height) * 2), camera);
-    if (ray.ray.intersectPlane(floorPlane, hit) && hit.z > -LANE_D / 2 && hit.z < HANDLE_Z + 0.9) {
-      const near = Math.abs(hit.x - gate.position.x);
-      return { x: hit.x, onGate: near < (hit.z > LANE_D / 2 ? 0.9 : 0.35), onLane: Math.abs(hit.x) < LANE_L / 2 + 0.3 };
-    }
-    if (ray.ray.intersectPlane(backPlane, hit) && hit.y > 0 && hit.y < ARCH) {
-      return { x: hit.x, onGate: Math.abs(hit.x - gate.position.x) < 0.3, onLane: false };
-    }
-    return null;
+    const x = ((clientX - r.left) / r.width) * W;
+    const y = ((clientY - r.top) / r.height) * H;
+    const lip = laneB + FRONT + 18;
+    const onHandle = y > lip && Math.abs(x - gateFront.x - handle.x) < HANDLE_W / 2 + 14;
+    const onPost = y > laneT - ARCH && y <= lip && Math.abs(x - gateFront.x) < 20;
+    return { x, onGate: onHandle || onPost, onLane: y >= laneT && y <= laneB + FRONT && x > x0 - 12 && x < x1 + 12 };
   };
   const moveTo = (x: number) => {
     const raw = rollAt(x);
@@ -414,12 +440,10 @@ export function createDiceStage(ctx: ThreeStageContext): DiceStage {
   const onDown = (e: PointerEvent) => {
     if (locked || !e.isPrimary || e.button !== 0) return;
     const p = pick(e.clientX, e.clientY);
-    if (!p) return;
     if (p.onGate) {
       dragging = true;
       canvas.style.cursor = "grabbing";
-      grabY = e.clientY;
-      grabOffset = p.x - gate.position.x;
+      grabOffset = p.x - gateFront.x;
       canvas.setPointerCapture(e.pointerId);
     } else if (p.onLane) {
       tap = { x: e.clientX, y: e.clientY };
@@ -427,22 +451,20 @@ export function createDiceStage(ctx: ThreeStageContext): DiceStage {
   };
   const onMove = (e: PointerEvent) => {
     if (!e.isPrimary) return;
+    const p = pick(e.clientX, e.clientY);
     if (dragging && !locked) {
-      // Horizontal only: follow the pointer along the line it grabbed, wherever it drifts vertically.
-      const p = pick(e.clientX, grabY);
-      if (p) moveTo(p.x - grabOffset);
+      moveTo(p.x - grabOffset);
       return;
     }
-    const p = locked ? null : pick(e.clientX, e.clientY);
-    hover = !!p?.onGate;
-    canvas.style.cursor = p?.onGate ? "grab" : p?.onLane ? "pointer" : "";
+    hover = !locked && p.onGate;
+    canvas.style.cursor = locked ? "" : p.onGate ? "grab" : p.onLane ? "pointer" : "";
   };
   const onUp = (e: PointerEvent) => {
     if (!e.isPrimary) return;
     // A tap (not a scroll that started on the lane) sends the gate there.
     if (tap && !locked && e.type === "pointerup" && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < 8) {
       const p = pick(e.clientX, e.clientY);
-      if (p?.onLane) moveTo(p.x);
+      if (p.onLane) moveTo(p.x);
     }
     tap = null;
     dragging = false;
@@ -451,6 +473,7 @@ export function createDiceStage(ctx: ThreeStageContext): DiceStage {
   const onLeave = () => {
     hover = false;
   };
+  // Pixi's event system disables touch gestures on its canvas; the page must still scroll over the lane.
   canvas.style.touchAction = "pan-y";
   canvas.addEventListener("pointerdown", onDown);
   canvas.addEventListener("pointermove", onMove);
@@ -460,7 +483,9 @@ export function createDiceStage(ctx: ThreeStageContext): DiceStage {
 
   /* ------------------------------- Frame ------------------------------ */
 
-  const frame = (dt: number) => {
+  const tick = (t: Ticker) => {
+    // Capped so a throttled tab does not skip a whole animation.
+    const dt = Math.min(50, t.deltaMS);
     time += dt;
     const ease = (ms: number) => (reduced ? 1 : 1 - Math.exp(-dt / ms));
 
@@ -472,19 +497,20 @@ export function createDiceStage(ctx: ThreeStageContext): DiceStage {
 
     if (mode === "idle") {
       const k = ease(160);
-      die.position.x += (0 - die.position.x) * k;
-      die.position.y += (hoverY() + (reduced ? 0 : Math.sin(time / 700) * 0.1) - die.position.y) * k;
-      if (reduced) die.rotation.set(0, 0, 0);
-      else die.rotation.set(0.15, Math.sin(time / 1400) * 0.5, 0);
+      pos.x += (W / 2 - pos.x) * k;
+      pos.y += (HOVER + (reduced ? 0 : Math.sin(time / 700) * 6) - pos.y) * k;
+      rot.x = reduced ? 0 : 0.15;
+      rot.y = reduced ? 0 : Math.sin(time / 1400) * 0.5;
+      rot.z = 0;
     } else if (mode === "roll") {
       const k = ease(140);
-      const wander = reduced ? 0 : Math.sin(time / 520) * 2.6;
-      die.position.x += (wander - die.position.x) * k;
-      die.position.y += (hoverY() + (reduced ? 0 : Math.sin(time / 210) * 0.2) - die.position.y) * k;
+      const wander = reduced ? 0 : Math.sin(time / 520) * laneL * 0.26;
+      pos.x += (W / 2 + wander - pos.x) * k;
+      pos.y += (HOVER + (reduced ? 0 : Math.sin(time / 210) * 12) - pos.y) * k;
       if (!reduced) {
-        die.rotation.x += dt * 0.009;
-        die.rotation.y += dt * 0.006;
-        die.rotation.z += dt * 0.0075;
+        rot.x += dt * 0.009;
+        rot.y += dt * 0.006;
+        rot.z += dt * 0.0075;
         if (time - shuffleAt > 70) {
           shuffleAt = time;
           show(fmt(Math.floor(Math.random() * ROLL_RANGE)));
@@ -493,49 +519,43 @@ export function createDiceStage(ctx: ThreeStageContext): DiceStage {
       }
     }
     anim?.(dt);
+    poseDie();
 
     pulse = Math.max(0, pulse - dt / 1400);
     const beat = pulse * (0.5 + 0.5 * Math.sin(time / 70));
-    winZone.material.emissiveIntensity = 0.12 + (tone === "win" ? beat * 0.7 : 0);
-    loseZone.material.emissiveIntensity = 0.12 + (tone === "lose" ? beat * 0.6 : 0);
-    flash.intensity = pulse * 9;
+    if (tone === "neutral" || pulse === 0) {
+      zoneGlow.alpha = 0;
+    } else {
+      const lit = tone === "win" ? winZone.top : loseZone.top;
+      zoneGlow.x = lit.x;
+      zoneGlow.width = lit.width;
+      zoneGlow.alpha = beat * 0.3;
+    }
+    dieGlow.alpha = pulse;
 
     // Until the player has moved the gate once, the handle wiggles to say "drag me".
     const hint = !touched && !locked && !reduced && mode !== "reveal" ? Math.max(0, Math.sin(time / 900)) ** 12 : 0;
-    handle.position.x = Math.sin(time / 60) * 0.09 * hint;
-    const grow = dragging || hover || focused ? 1.12 : 1;
-    handle.scale.setScalar(handle.scale.x + (grow * dieScale ** 1.2 - handle.scale.x) * ease(60));
-    handleSide.color.set(focused ? 0x4cc9ff : WHITE);
-    gateMaterial.emissiveIntensity = dragging || hover || focused ? 1 : 0.55;
+    placeHandle(Math.sin(time / 60) * 6 * hint);
+    const active = dragging || hover || focused;
+    handle.scale.set(handle.scale.x + ((active ? 1.12 : 1) - handle.scale.x) * ease(60));
+    handleRing.visible = focused;
+    gateBack.alpha = active ? 1 : 0.8;
 
     if (ringLife > 0) {
       ringLife = Math.max(0, ringLife - dt / 520);
-      ring.scale.setScalar(0.4 + easeOutCubic(1 - ringLife) * ringSize);
-      ring.material.opacity = ringLife;
+      ring.scale.set(0.4 + easeOutCubic(1 - ringLife) * ringSize);
+      ring.alpha = ringLife;
     }
     ring.visible = ringLife > 0;
 
-    if (sparkLife > 0) {
-      sparkLife = Math.max(0, sparkLife - dt / 1100);
-      const s = dt / 1000;
-      for (let i = 0; i < SPARKS * 3; i += 3) {
-        sparkVel[i + 1] -= 9 * s;
-        for (let c = 0; c < 3; c++) sparkPos[i + c] += sparkVel[i + c] * s;
-      }
-      sparkGeometry.attributes.position.needsUpdate = true;
-      sparkMaterial.opacity = sparkLife;
-    }
-    sparks.visible = sparkLife > 0;
-
     shake = Math.max(0, shake - dt / 420);
-    root.position.x = shake > 0 ? Math.sin(time / 18) * 0.12 * shake : 0;
-
-    renderer.render(scene, camera);
+    root.x = shake > 0 ? Math.sin(time / 18) * 7 * shake : 0;
   };
 
   show("?");
   layoutZones();
-  die.position.set(0, HOVER_Y, 0);
+  poseDie();
+  app.ticker.add(tick);
 
   const stage: DiceStage = {
     onTarget: null,
@@ -594,14 +614,14 @@ export function createDiceStage(ctx: ThreeStageContext): DiceStage {
         mode = "reveal";
         setTone("neutral");
         needle.visible = true;
-        const x0 = die.position.x;
-        const x1 = xOf(roll);
-        const lift = Math.max(0, die.position.y - support());
+        const from = pos.x;
+        const to = xOf(roll);
+        const lift = Math.max(0, pos.y - support());
         // Angles unwind to zero, so the die always stops with its number upright. Rolling right spins clockwise.
         const turns = Math.PI * 2;
-        const ax = wrap(die.rotation.x) + turns;
-        const ay = wrap(die.rotation.y);
-        const az = wrap(die.rotation.z) + (x1 >= x0 ? turns : -2 * turns);
+        const ax = wrap(rot.x) + turns;
+        const ay = wrap(rot.y);
+        const az = wrap(rot.z) + (to >= from ? turns : -2 * turns);
         let elapsed = 0;
         let impacts = 0;
         let shownAt = -Infinity;
@@ -610,49 +630,26 @@ export function createDiceStage(ctx: ThreeStageContext): DiceStage {
           const k = clamp01(elapsed / REVEAL_MS);
           const e = easeOutCubic(k);
           const left = 1 - e;
-          die.rotation.set(ax * left, ay * left, az * left);
-          die.position.x = x0 + (x1 - x0) * e;
-          die.position.y = support() + throwHeight(k, lift);
-          needle.position.x = die.position.x;
+          rot.x = ax * left;
+          rot.y = ay * left;
+          rot.z = az * left;
+          pos.x = from + (to - from) * e;
+          pos.y = support() + throwHeight(k, lift);
+          needle.x = pos.x;
           if (impacts < BOUNCES.length && k >= BOUNCES[impacts].from) {
-            shockwave(die.position.x, WHITE, 1.6 - impacts * 0.4);
+            shockwave(pos.x, WHITE, 1.6 - impacts * 0.4);
             sfx.tick(6 - impacts * 2);
             impacts++;
           }
           // The number is the die's live position on the lane, so it settles exactly on the roll.
           if (elapsed - shownAt > 45) {
             shownAt = elapsed;
-            show(fmt(clamp(Math.round(rollAt(die.position.x)), 0, ROLL_RANGE - 1)));
+            show(fmt(clamp(Math.round(rollAt(pos.x)), 0, ROLL_RANGE - 1)));
           }
           if (k >= 1) finish(roll, win);
         };
       });
     },
-
-    resize(width, height) {
-      // Narrow screens shrink the whole lane, so enlarge the die to keep its number readable.
-      dieScale = width < 480 ? 1.35 : 1;
-      die.scale.setScalar(dieScale);
-      if (mode === "done") die.position.y = (DIE / 2) * dieScale;
-
-      // Fit the front edge of the base to the width...
-      const pitch = THREE.MathUtils.degToRad(width < 480 ? 46 : 33);
-      const tan = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
-      const front = { x: LANE_L / 2 + 0.8, y: -0.56, z: 2.4 };
-      const distance = front.x / (0.97 * tan * (width / height)) + front.z * Math.cos(pitch) + front.y * Math.sin(pitch);
-      camera.aspect = width / height;
-      camera.position.set(0, Math.sin(pitch) * distance, Math.cos(pitch) * distance);
-      camera.lookAt(0, 0, 0);
-      camera.clearViewOffset();
-      camera.updateProjectionMatrix();
-      camera.updateMatrixWorld();
-      // ...then shift the lens (no extra perspective) so that edge rests at the bottom of the canvas.
-      const edge = new THREE.Vector3(0, front.y, front.z).project(camera).y;
-      camera.setViewOffset(width, height, 0, (-0.96 - edge) * (height / 2), width, height);
-      camera.updateMatrixWorld();
-    },
-
-    frame,
 
     destroy() {
       canvas.removeEventListener("pointerdown", onDown);
@@ -660,17 +657,9 @@ export function createDiceStage(ctx: ThreeStageContext): DiceStage {
       canvas.removeEventListener("pointerup", onUp);
       canvas.removeEventListener("pointercancel", onUp);
       canvas.removeEventListener("pointerleave", onLeave);
-      readout.remove();
-      scene.traverse((o) => {
-        if (!(o instanceof THREE.Mesh || o instanceof THREE.Points)) return;
-        o.geometry.dispose();
-        for (const m of [o.material].flat() as (THREE.Material & { map?: THREE.Texture | null })[]) {
-          m.map?.dispose();
-          m.dispose();
-        }
-      });
-      key.dispose();
-      environment.dispose();
+      app.ticker.remove(tick);
+      fx.destroy();
+      faceTexture.destroy(true);
       const r = resolveReveal;
       resolveReveal = null;
       r?.();

@@ -111,7 +111,7 @@ body {
   color: rgb(238 240 255 / 0.5);
 }
 
-/* Styled range input (dice gate, shown when WebGL is unavailable). */
+/* Styled range input (dice gate, shown when the game canvas cannot start). */
 .range {
   appearance: none;
   width: 100%;
